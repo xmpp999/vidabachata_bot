@@ -41,7 +41,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 BOT_USERNAME = os.getenv("BOT_USERNAME", "your_bot")
 
-SMTP_HOST = os.getenv("SMTP_HOST", "smtp.yandex.ru")
+SMTP_HOST = os.getenv("SMTP_HOST", "smtp.mail.ru")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "465"))
 SMTP_USER = os.getenv("SMTP_USER", "")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
@@ -133,7 +133,7 @@ def make_csv(headers, rows) -> bytes:
 
 
 async def send_email_code(email: str, code: str) -> bool:
-    """Отправляет код подтверждения через SMTP Mail.ru."""
+    """Отправляет код подтверждения через SMTP."""
     if not (SMTP_USER and SMTP_PASSWORD):
         print(f"[EMAIL] SMTP не настроен, код для {email}: {code}")
         return False
@@ -164,13 +164,6 @@ async def send_email_code(email: str, code: str) -> bool:
     except Exception as e:
         print(f"[EMAIL] Ошибка отправки на {email}: {e}")
         return False
-
-
-
-
-
-
-
 
 
 async def send_report_to_admin():
@@ -342,7 +335,7 @@ async def get_email(message: Message, state: FSMContext):
     code = f"{random.randint(100000, 999999)}"
     codes[message.from_user.id] = code
     await state.update_data(email=email)
-    send_email_code(email, code)
+    await send_email_code(email, code)
     await message.answer(
         "📨 На почту отправлен код. Отправьте его сюда.\n"
         "Если не нашли — проверьте Спам."
@@ -862,121 +855,4 @@ async def admin_list(call: CallbackQuery):
         status = "🟢" if e.get("active") else "🔴"
         text += f"{status} <b>{e['title']}</b>\n   📅 {e['date_text']}\n   🆔 <code>{e['id']}</code>\n\n"
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin:back")],
-    ])
-    await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
-
-
-@dp.callback_query(F.data == "admin:delete")
-async def admin_delete_list(call: CallbackQuery):
-    if not events:
-        await call.message.edit_text("📭 Нет событий.")
-        return
-    buttons = []
-    for e in events:
-        buttons.append([InlineKeyboardButton(
-            text=f"🗑 {e['title']}",
-            callback_data=f"admin:del:{e['id']}"
-        )])
-    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="admin:back")])
-    await call.message.edit_text(
-        "🗑 Выбери событие:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
-    )
-
-
-@dp.callback_query(F.data.startswith("admin:del:"))
-async def admin_delete_confirm(call: CallbackQuery, state: FSMContext):
-    eid = call.data.split(":")[2]
-    global events
-    events = [e for e in events if e["id"] != eid]
-    save_data()
-    await call.message.edit_text("✅ Удалено.")
-    await show_admin_menu(call.message, state)
-
-
-@dp.callback_query(F.data == "admin:stats")
-async def admin_stats(call: CallbackQuery):
-    total = sum(o["price"] for o in orders)
-    await call.message.edit_text(
-        f"📊 <b>Статистика</b>\n\n"
-        f"👥 Юзеров: {len(users)}\n"
-        f"🎫 Заказов: {len(orders)}\n"
-        f"💰 Выручка: {total} ₽\n"
-        f"🎟 Билетов: {len(tickets)}",
-        parse_mode="HTML",
-    )
-
-
-@dp.callback_query(F.data == "admin:broadcast")
-async def admin_broadcast_start(call: CallbackQuery, state: FSMContext):
-    await call.message.edit_text(
-        f"📢 Получателей: {len(users)}\n\nОтправь текст:"
-    )
-    await state.set_state(Admin.broadcast)
-
-
-@dp.message(Admin.broadcast)
-async def admin_broadcast_send(message: Message, state: FSMContext):
-    sent = failed = 0
-    for uid in users:
-        try:
-            await bot.send_message(uid, message.text, parse_mode="HTML")
-            sent += 1
-        except Exception:
-            failed += 1
-    await message.answer(f"✅ Отправлено: {sent}, ошибок: {failed}")
-    await state.clear()
-
-
-@dp.callback_query(F.data == "admin:find_ticket")
-async def admin_find_ticket(call: CallbackQuery, state: FSMContext):
-    await call.message.edit_text("🎫 Отправь код билета:")
-    await state.set_state(Admin.find_ticket)
-
-
-@dp.message(Admin.find_ticket)
-async def admin_find_ticket_check(message: Message, state: FSMContext):
-    code = message.text.strip().upper()
-    ticket = tickets.get(code)
-    if not ticket:
-        await message.answer(f"❌ Не найден: {code}")
-        return
-    status = "⚠️ Использован" if ticket.get("used") else "✅ Действителен"
-    text = (
-        f"🎫 <b>{code}</b>\n"
-        f"{status}\n"
-        f"Владелец: {ticket['holder']}\n"
-        f"Тип: {ticket['type']}\n"
-        f"ID: {ticket['user_id']}"
-    )
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(
-            text="✅ Отметить использованным",
-            callback_data=f"admin:used:{code}"
-        )],
-    ])
-    await message.answer(text, reply_markup=kb, parse_mode="HTML")
-    await state.clear()
-
-
-@dp.callback_query(F.data.startswith("admin:used:"))
-async def admin_mark_used(call: CallbackQuery):
-    code = call.data.split(":")[2]
-    if code in tickets:
-        tickets[code]["used"] = True
-        save_data()
-        await call.message.edit_text(f"✅ {code} — использован.")
-
-
-# ================== ЗАПУСК ==================
-async def main():
-    print("🚀 Бот запускается...")
-    load_data()
-    await bot.delete_webhook(drop_pending_updates=True)
-    print(f"✅ Бот @{BOT_USERNAME} работает")
-    await dp.start_polling(bot)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+        [InlineKeyboard

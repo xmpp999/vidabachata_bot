@@ -855,4 +855,7 @@ async def admin_list(call: CallbackQuery):
         status = "🟢" if e.get("active") else "🔴"
         text += f"{status} <b>{e['title']}</b>\n   📅 {e['date_text']}\n   🆔 <code>{e['id']}</code>\n\n"
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboard
+               [InlineKeyboardButton(
+            text="📤 Отправить отчёт на email",
+            callback_data="admin:report"
+        )],

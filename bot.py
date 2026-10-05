@@ -132,10 +132,45 @@ def make_csv(headers, rows) -> bytes:
     return buf.getvalue().encode("utf-8-sig")
 
 
-def send_email_code(email: str, code: str) -> bool:
-    """Заглушка. Замени на реальную отправку через SMTP."""
-    print(f"[EMAIL] → {email}: код {code}")
-    return True
+async def send_email_code(email: str, code: str) -> bool:
+    """Отправляет код подтверждения через SMTP Mail.ru."""
+    if not (SMTP_USER and SMTP_PASSWORD):
+        print(f"[EMAIL] SMTP не настроен, код для {email}: {code}")
+        return False
+
+    msg = EmailMessage()
+    msg["From"] = SMTP_USER
+    msg["To"] = email
+    msg["Subject"] = "Код подтверждения регистрации"
+
+    msg.set_content(
+        f"Здравствуйте!\n\n"
+        f"Ваш код подтверждения: {code}\n\n"
+        f"Введите его в боте.\n\n"
+        f"— Vida Bachata 💃"
+    )
+
+    try:
+        await aiosmtplib.send(
+            msg,
+            hostname=SMTP_HOST,
+            port=SMTP_PORT,
+            username=SMTP_USER,
+            password=SMTP_PASSWORD,
+            use_tls=True,
+        )
+        print(f"[EMAIL] Код отправлен на {email}")
+        return True
+    except Exception as e:
+        print(f"[EMAIL] Ошибка отправки на {email}: {e}")
+        return False
+
+
+
+
+
+
+
 
 
 async def send_report_to_admin():

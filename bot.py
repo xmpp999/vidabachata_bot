@@ -154,10 +154,12 @@ async def send_email_code(email: str, code: str) -> bool:
         )
         print(f"[EMAIL] Код отправлен на {email}")
         return True
-    except Exception as e:
+       except Exception as e:
         print(f"[EMAIL] Ошибка отправки на {email}: {e}")
         return False
-    async def send_report_to_admin():
+
+
+async def send_report_to_admin():
     """Отправляет отчёт админу на email."""
     users_rows = [[
         uid, u.get("username", ""), u.get("email", ""),

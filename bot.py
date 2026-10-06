@@ -154,7 +154,7 @@ async def send_email_code(email: str, code: str) -> bool:
         )
         print(f"[EMAIL] Код отправлен на {email}")
         return True
-       except Exception as e:
+    except Exception as e:
         print(f"[EMAIL] Ошибка отправки на {email}: {e}")
         return False
 

@@ -15,6 +15,7 @@ from email.message import EmailMessage
 
 import aiosmtplib
 import qrcode
+import resend
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command, CommandObject
 from aiogram.fsm.context import FSMContext
@@ -34,6 +35,9 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 BOT_USERNAME = os.getenv("BOT_USERNAME", "your_bot")
 
+# Resend API (для отправки email)
+RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
+
 SMTP_HOST = os.getenv("SMTP_HOST", "smtp.mail.ru")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "465"))
 SMTP_USER = os.getenv("SMTP_USER", "")
@@ -41,6 +45,7 @@ SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "")
 
 DATA_FILE = os.getenv("DATA_FILE", "bot_data.json")
+
 
 # ================== БОТ ==================
 bot = Bot(BOT_TOKEN)
@@ -126,33 +131,34 @@ def make_csv(headers, rows) -> bytes:
 
 
 async def send_email_code(email: str, code: str) -> bool:
-    """Отправляет код подтверждения через SMTP."""
-    if not (SMTP_USER and SMTP_PASSWORD):
-        print(f"[EMAIL] SMTP не настроен, код для {email}: {code}")
+    """Отправляет код подтверждения через Resend API."""
+    if not RESEND_API_KEY:
+        print(f"[EMAIL] RESEND_API_KEY не задан, код для {email}: {code}")
         return False
 
-    msg = EmailMessage()
-    msg["From"] = SMTP_USER
-    msg["To"] = email
-    msg["Subject"] = "Код подтверждения регистрации"
-
-    msg.set_content(
-        f"Здравствуйте!\n\n"
-        f"Ваш код подтверждения: {code}\n\n"
-        f"Введите его в боте.\n\n"
-        f"— Vida Bachata 💃"
-    )
+    resend.api_key = RESEND_API_KEY
 
     try:
-        await aiosmtplib.send(
-            msg,
-            hostname=SMTP_HOST,
-            port=SMTP_PORT,
-            username=SMTP_USER,
-            password=SMTP_PASSWORD,
-            use_tls=True,
+        # Resend SDK синхронный — оборачиваем в to_thread,
+        # чтобы не блокировать async-loop бота
+        result = await asyncio.to_thread(
+            resend.Emails.send,
+            {
+                # На бесплатном тарифе — только onboarding@resend.dev.
+                # После верификации домена заменишь на свой (например, no-reply@vidabachata.ru).
+                "from": "onboarding@resend.dev",
+                "to": email,
+                "subject": "Код подтверждения регистрации",
+                "html": (
+                    f"<p>Здравствуйте!</p>"
+                    f"<p>Ваш код подтверждения: "
+                    f"<b style='font-size:20px;letter-spacing:3px'>{code}</b></p>"
+                    f"<p>Введите его в боте.</p>"
+                    f"<p>— Vida Bachata 💃</p>"
+                ),
+            },
         )
-        print(f"[EMAIL] Код отправлен на {email}")
+        print(f"[EMAIL] Код отправлен на {email}: {result}")
         return True
     except Exception as e:
         print(f"[EMAIL] Ошибка отправки на {email}: {e}")

@@ -15,7 +15,6 @@ from email.message import EmailMessage
 
 import aiosmtplib
 import qrcode
-import resend
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command, CommandObject
 from aiogram.fsm.context import FSMContext
@@ -35,9 +34,6 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 BOT_USERNAME = os.getenv("BOT_USERNAME", "your_bot")
 
-# Resend API (для отправки email)
-RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
-
 SMTP_HOST = os.getenv("SMTP_HOST", "smtp.mail.ru")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "465"))
 SMTP_USER = os.getenv("SMTP_USER", "")
@@ -46,14 +42,12 @@ ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "")
 
 DATA_FILE = os.getenv("DATA_FILE", "bot_data.json")
 
-
 # ================== БОТ ==================
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
 
 # ================== ХРАНИЛИЩЕ ==================
 users = {}
-codes = {}
 username_index = {}
 pending_invites = {}
 tickets = {}
@@ -130,43 +124,8 @@ def make_csv(headers, rows) -> bytes:
     return buf.getvalue().encode("utf-8-sig")
 
 
-async def send_email_code(email: str, code: str) -> bool:
-    """Отправляет код подтверждения через Resend API."""
-    if not RESEND_API_KEY:
-        print(f"[EMAIL] RESEND_API_KEY не задан, код для {email}: {code}")
-        return False
-
-    resend.api_key = RESEND_API_KEY
-
-    try:
-        # Resend SDK синхронный — оборачиваем в to_thread,
-        # чтобы не блокировать async-loop бота
-        result = await asyncio.to_thread(
-            resend.Emails.send,
-            {
-                # На бесплатном тарифе — только onboarding@resend.dev.
-                # После верификации домена заменишь на свой (например, no-reply@vidabachata.ru).
-                "from": "onboarding@resend.dev",
-                "to": email,
-                "subject": "Код подтверждения регистрации",
-                "html": (
-                    f"<p>Здравствуйте!</p>"
-                    f"<p>Ваш код подтверждения: "
-                    f"<b style='font-size:20px;letter-spacing:3px'>{code}</b></p>"
-                    f"<p>Введите его в боте.</p>"
-                    f"<p>— Vida Bachata 💃</p>"
-                ),
-            },
-        )
-        print(f"[EMAIL] Код отправлен на {email}: {result}")
-        return True
-    except Exception as e:
-        print(f"[EMAIL] Ошибка отправки на {email}: {e}")
-        return False
-
-
 async def send_report_to_admin():
-    """Отправляет отчёт админу на email."""
+    """Отправляет отчёт админу на email (через SMTP — может не работать на Railway)."""
     users_rows = [[
         uid, u.get("username", ""), u.get("email", ""),
         u.get("name", ""), u.get("surname", ""), u.get("gender", ""),
@@ -231,15 +190,15 @@ async def send_report_to_admin():
     except Exception as e:
         print(f"[EMAIL] Ошибка: {e}")
 
+        # ================== СОСТОЯНИЯ ==================
 
-# ================== СОСТОЯНИЯ ==================
+
 class Reg(StatesGroup):
-    email = State()
-    code = State()
+    phone = State()
     name = State()
     surname = State()
     gender = State()
-    phone = State()
+    email = State()
     confirm = State()
     ticket_type = State()
     partner_input = State()
@@ -281,8 +240,7 @@ async def start_with_invite(message: Message, state: FSMContext, command: Comman
                 "с пригласившим.",
             )
 
-    await message.answer("📧 Введите ваш Email:")
-    await state.set_state(Reg.email)
+    await ask_phone(message, state)
 
 
 @dp.message(CommandStart())
@@ -320,42 +278,50 @@ async def start_registration(call: CallbackQuery, state: FSMContext):
         )
         return
 
-    await call.message.answer("📧 Введите ваш Email:")
-    await state.set_state(Reg.email)
+    await ask_phone(call.message, state)
+
+
+async def ask_phone(message: Message, state: FSMContext):
+    """Запрашивает у пользователя контакт через кнопку «Поделиться»."""
+    kb = ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="📱 Поделиться контактом", request_contact=True)]],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+    await message.answer(
+        "Нажмите кнопку «Поделиться контактом» внизу, "
+        "чтобы отправить свой номер телефона 👇",
+        reply_markup=kb,
+    )
+    await state.set_state(Reg.phone)
 
 
 # ================== РЕГИСТРАЦИЯ ==================
-@dp.message(Reg.email)
-async def get_email(message: Message, state: FSMContext):
-    email = message.text.strip()
-    if not is_valid_email(email):
-        await message.answer("❌ Неверный email. Попробуйте ещё раз:")
+@dp.message(Reg.phone, F.contact)
+async def get_phone(message: Message, state: FSMContext):
+    contact = message.contact
+    if contact.user_id and contact.user_id != message.from_user.id:
+        await message.answer("Пожалуйста, отправьте свой собственный контакт.")
         return
-    code = f"{random.randint(100000, 999999)}"
-    codes[message.from_user.id] = code
-    await state.update_data(email=email)
-    await send_email_code(email, code)
+
+    await state.update_data(phone=contact.phone_number)
     await message.answer(
-        "📨 На почту отправлен код. Отправьте его сюда.\n"
-        "Если не нашли — проверьте Спам."
+        "✅ Телефон получен!\n\nОтправьте ответным сообщением своё Имя.",
+        reply_markup=ReplyKeyboardRemove(),
     )
-    await state.set_state(Reg.code)
-
-
-@dp.message(Reg.code)
-async def check_code(message: Message, state: FSMContext):
-    if message.text.strip() != codes.get(message.from_user.id):
-        await message.answer("❌ Неверный код.")
-        return
-    await message.answer("✅ Email подтверждён!\n\nОтправьте ваше Имя.")
     await state.set_state(Reg.name)
+
+
+@dp.message(Reg.phone)
+async def wrong_phone(message: Message):
+    await message.answer("Нажмите кнопку «Поделиться контактом» 👇")
 
 
 @dp.message(Reg.name)
 async def get_name(message: Message, state: FSMContext):
     name = message.text.strip()
     if len(name) < 2:
-        await message.answer("Слишком короткое имя:")
+        await message.answer("Слишком короткое имя, попробуйте ещё раз:")
         return
     await state.update_data(name=name)
     await message.answer("Отправьте вашу Фамилию.")
@@ -366,7 +332,7 @@ async def get_name(message: Message, state: FSMContext):
 async def get_surname(message: Message, state: FSMContext):
     surname = message.text.strip()
     if len(surname) < 2:
-        await message.answer("Слишком короткая фамилия:")
+        await message.answer("Слишком короткая фамилия, попробуйте ещё раз:")
         return
     await state.update_data(surname=surname)
     kb = InlineKeyboardMarkup(inline_keyboard=[[
@@ -381,41 +347,51 @@ async def get_surname(message: Message, state: FSMContext):
 async def get_gender(call: CallbackQuery, state: FSMContext):
     gender = "Мужской" if call.data == "gender:M" else "Женский"
     await state.update_data(gender=gender)
-    kb = ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="📱 Поделиться контактом", request_contact=True)]],
-        resize_keyboard=True, one_time_keyboard=True,
-    )
     await call.message.edit_text(f"Пол: {gender}")
     await call.message.answer(
-        "Нажмите «Поделиться» и отправьте контакт:",
-        reply_markup=kb,
+        "📧 Отправьте свой email — он понадобится для новостей и чеков.\n\n"
+        "Или отправьте <code>-</code>, чтобы пропустить этот шаг.",
+        parse_mode="HTML",
     )
-    await state.set_state(Reg.phone)
+    await state.set_state(Reg.email)
 
 
-@dp.message(Reg.phone, F.contact)
-async def get_phone(message: Message, state: FSMContext):
-    await state.update_data(phone=message.contact.phone_number)
+@dp.message(Reg.email)
+async def get_email(message: Message, state: FSMContext):
+    email = message.text.strip()
+
+    if email == "-":
+        await state.update_data(email="")
+    elif not is_valid_email(email):
+        await message.answer(
+            "❌ Неверный email. Попробуйте ещё раз или отправьте <code>-</code>.",
+            parse_mode="HTML",
+        )
+        return
+    else:
+        await state.update_data(email=email)
+
+    await show_confirmation(message, state)
+
+
+async def show_confirmation(message: Message, state: FSMContext):
     data = await state.get_data()
+    email_line = f"📧 {data['email']}\n" if data.get("email") else ""
+
     text = (
-        "📋 <b>Проверьте данные:</b>\n\n"
-        f"📧 {data['email']}\n"
+        "📋 <b>Проверьте ваши данные:</b>\n\n"
+        f"📱 {data['phone']}\n"
         f"👤 {data['name']} {data['surname']}\n"
         f"⚧ {data['gender']}\n"
-        f"📱 {data['phone']}"
+        f"{email_line}"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Согласен", callback_data="confirm_yes")],
         [InlineKeyboardButton(text="🔄 Перезаполнить", callback_data="confirm_restart")],
     ])
-    await message.answer(text, reply_markup=ReplyKeyboardRemove(), parse_mode="HTML")
+    await message.answer(text, parse_mode="HTML")
     await message.answer("Всё верно?", reply_markup=kb)
     await state.set_state(Reg.confirm)
-
-
-@dp.message(Reg.phone)
-async def wrong_phone(message: Message):
-    await message.answer("Нажмите кнопку «Поделиться контактом» 👇")
 
 
 @dp.callback_query(F.data == "confirm_yes", Reg.confirm)
@@ -453,11 +429,10 @@ async def confirm_restart(call: CallbackQuery, state: FSMContext):
     if call.from_user.username:
         username_index.pop(call.from_user.username.lower(), None)
     await state.clear()
-    await call.message.edit_text("🔄 Начинаем заново.\n\n📧 Введите Email:")
-    await state.set_state(Reg.email)
-    
-# ================== МЕРОПРИЯТИЯ ==================
+    await call.message.edit_text("🔄 Начинаем заново.")
+    await ask_phone(call.message, state)
 
+    # ================== МЕРОПРИЯТИЯ ==================
 @dp.callback_query(F.data == "show_events")
 async def show_events(call: CallbackQuery):
     now = datetime.now()
@@ -689,9 +664,7 @@ async def paid(call: CallbackQuery, state: FSMContext):
 async def cancel_order(call: CallbackQuery, state: FSMContext):
     await state.clear()
     await call.message.edit_text("❌ Отменено. /start — заново.")
-    
-# ================== АДМИН ==================
-
+    # ================== АДМИН ==================
 @dp.message(Command("admin"))
 async def admin_start(message: Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID:

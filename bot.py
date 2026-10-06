@@ -683,7 +683,9 @@ async def paid(call: CallbackQuery, state: FSMContext):
 async def cancel_order(call: CallbackQuery, state: FSMContext):
     await state.clear()
     await call.message.edit_text("❌ Отменено. /start — заново.")
+    
     # ================== АДМИН ==================
+
 @dp.message(Command("admin"))
 async def admin_start(message: Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID:

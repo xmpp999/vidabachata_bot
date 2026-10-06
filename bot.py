@@ -449,7 +449,9 @@ async def confirm_restart(call: CallbackQuery, state: FSMContext):
     await state.clear()
     await call.message.edit_text("🔄 Начинаем заново.\n\n📧 Введите Email:")
     await state.set_state(Reg.email)
+    
     # ================== МЕРОПРИЯТИЯ ==================
+
 @dp.callback_query(F.data == "show_events")
 async def show_events(call: CallbackQuery):
     now = datetime.now()

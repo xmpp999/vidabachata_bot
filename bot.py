@@ -31,7 +31,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-# print(f"[DEBUG] BOT_TOKEN длина: {len(BOT_TOKEN)}, префикс: {BOT_TOKEN[:15]}")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 BOT_USERNAME = os.getenv("BOT_USERNAME", "your_bot")
 
@@ -68,13 +67,14 @@ def save_data():
         "orders": orders,
         "tickets": tickets,
         "settings": settings,
+        "users": {str(uid): u for uid, u in users.items()},   # ← НОВОЕ
     }
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
 def load_data():
-    global events, orders, tickets, settings
+    global events, orders, tickets, settings, users, username_index
     try:
         with open(DATA_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -82,7 +82,19 @@ def load_data():
             orders = data.get("orders", [])
             tickets = data.get("tickets", {})
             settings.update(data.get("settings", {}))
-            print(f"✅ Загружено: {len(events)} событий, {len(orders)} заказов")
+
+            # Восстанавливаем users (ключи в JSON — строки, конвертируем в int)
+            raw_users = data.get("users", {})
+            users = {int(uid): u for uid, u in raw_users.items()}
+
+            # Перестраиваем username_index
+            username_index = {}
+            for uid, u in users.items():
+                uname = (u.get("username") or "").lower()
+                if uname:
+                    username_index[uname] = uid
+
+            print(f"✅ Загружено: {len(events)} событий, {len(orders)} заказов, {len(users)} юзеров")
     except FileNotFoundError:
         print("ℹ️ Файл данных не найден, начинаем с чистого листа")
 
@@ -124,6 +136,19 @@ def make_csv(headers, rows) -> bytes:
     writer.writerow(headers)
     writer.writerows(rows)
     return buf.getvalue().encode("utf-8-sig")
+
+
+def format_user_info(user_id: int, u: dict) -> str:
+    """Форматирует информацию о пользователе для отображения в Telegram."""
+    return (
+        f"👤 <b>{u.get('name', '—')} {u.get('surname', '—')}</b>\n"
+        f"🆔 <code>{user_id}</code>\n"
+        f"📧 {u.get('email') or '—'}\n"
+        f"📱 {u.get('phone', '—')}\n"
+        f"⚧ {u.get('gender', '—')}\n"
+        f"🔗 @{u.get('username') or '—'}\n"
+        f"📅 {u.get('registered_at', '—')}\n"
+    )
 
 
 async def send_report_to_admin():
@@ -194,7 +219,6 @@ async def send_report_to_admin():
 
 # ================== СОСТОЯНИЯ ==================
 
-
 class Reg(StatesGroup):
     phone = State()
     name = State()
@@ -220,6 +244,7 @@ class Admin(StatesGroup):
     delete_select = State()
     find_ticket = State()
     broadcast = State()
+    search_user = State()
     settings_edit = State()
 
 
@@ -405,6 +430,8 @@ async def confirm_yes(call: CallbackQuery, state: FSMContext):
     if call.from_user.username:
         username_index[call.from_user.username.lower()] = call.from_user.id
 
+    save_data()   # ← НОВОЕ: сохраняем сразу после регистрации
+
     inviter_id = pending_invites.pop(call.from_user.id, None)
     if inviter_id and inviter_id in users:
         try:
@@ -433,6 +460,7 @@ async def confirm_restart(call: CallbackQuery, state: FSMContext):
     await state.clear()
     await call.message.edit_text("🔄 Начинаем заново.")
     await ask_phone(call.message, state)
+
 
 # ================== МЕРОПРИЯТИЯ ==================
 
@@ -509,8 +537,8 @@ async def event_selected(call: CallbackQuery, state: FSMContext):
 
     await state.set_state(Reg.ticket_type)
 
-
 # ================== ОПЛАТА ==================
+
 async def go_to_payment(message: Message, state: FSMContext):
     data = await state.get_data()
     price = data.get("price", 0)
@@ -667,7 +695,8 @@ async def paid(call: CallbackQuery, state: FSMContext):
 async def cancel_order(call: CallbackQuery, state: FSMContext):
     await state.clear()
     await call.message.edit_text("❌ Отменено. /start — заново.")
-    
+
+
 # ================== АДМИН ==================
 
 @dp.message(Command("admin"))
@@ -684,6 +713,7 @@ async def show_admin_menu(message: Message, state: FSMContext):
         [InlineKeyboardButton(text="➕ Создать событие", callback_data="admin:add")],
         [InlineKeyboardButton(text="🗑 Удалить событие", callback_data="admin:delete")],
         [InlineKeyboardButton(text="📋 Список событий", callback_data="admin:list")],
+        [InlineKeyboardButton(text="👥 Пользователи", callback_data="admin:users:0")],   # ← НОВАЯ
         [InlineKeyboardButton(text="📊 Статистика", callback_data="admin:stats")],
         [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin:broadcast")],
         [InlineKeyboardButton(text="🎫 Найти билет", callback_data="admin:find_ticket")],
@@ -863,9 +893,7 @@ async def admin_delete_confirm(call: CallbackQuery, state: FSMContext):
     save_data()
     await call.message.edit_text("✅ Удалено.")
     await show_admin_menu(call.message, state)
-
-
-@dp.callback_query(F.data == "admin:stats")
+    @dp.callback_query(F.data == "admin:stats")
 async def admin_stats(call: CallbackQuery):
     total = sum(o["price"] for o in orders)
     await call.message.edit_text(
@@ -878,6 +906,166 @@ async def admin_stats(call: CallbackQuery):
     )
 
 
+# ================== ПОЛЬЗОВАТЕЛИ ==================
+USERS_PER_PAGE = 5
+
+
+def build_users_page(page: int):
+    """Строит страницу со списком пользователей и клавиатуру."""
+    user_ids = list(users.keys())
+    total = len(user_ids)
+
+    if total == 0:
+        return "📭 Пока нет зарегистрированных пользователей.", None
+
+    total_pages = (total + USERS_PER_PAGE - 1) // USERS_PER_PAGE
+    page = max(0, min(page, total_pages - 1))
+
+    start = page * USERS_PER_PAGE
+    end = start + USERS_PER_PAGE
+    page_ids = user_ids[start:end]
+
+    text = f"👥 <b>Пользователи</b> ({total} всего)\n"
+    text += f"Страница {page + 1} из {total_pages}\n\n"
+
+    for uid in page_ids:
+        u = users[uid]
+        text += format_user_info(uid, u)
+        text += "➖➖➖➖➖➖➖➖➖➖\n"
+
+    # Кнопки пагинации
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(InlineKeyboardButton(
+            text="⬅️ Назад", callback_data=f"admin:users:{page - 1}"
+        ))
+    if page < total_pages - 1:
+        nav_buttons.append(InlineKeyboardButton(
+            text="Вперёд ➡️", callback_data=f"admin:users:{page + 1}"
+        ))
+
+    kb_rows = []
+    if nav_buttons:
+        kb_rows.append(nav_buttons)
+
+    kb_rows.append([InlineKeyboardButton(
+        text="📤 Выгрузить всех в CSV", callback_data="admin:users:export"
+    )])
+    kb_rows.append([InlineKeyboardButton(
+        text="🔍 Найти по email или ID", callback_data="admin:users:search"
+    )])
+    kb_rows.append([InlineKeyboardButton(
+        text="⬅️ В админ-панель", callback_data="admin:back"
+    )])
+
+    return text, InlineKeyboardMarkup(inline_keyboard=kb_rows)
+
+
+@dp.callback_query(F.data.startswith("admin:users:"))
+async def admin_users(call: CallbackQuery, state: FSMContext):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("Только для админа", show_alert=True)
+        return
+
+    action = call.data.split(":")[2]
+
+    # ---- Экспорт в CSV ----
+    if action == "export":
+        if not users:
+            await call.answer("Нет пользователей", show_alert=True)
+            return
+
+        rows = []
+        for uid, u in users.items():
+            rows.append([
+                uid,
+                u.get("username", ""),
+                u.get("email", ""),
+                u.get("name", ""),
+                u.get("surname", ""),
+                u.get("gender", ""),
+                u.get("phone", ""),
+                u.get("registered_at", ""),
+            ])
+        csv_bytes = make_csv(
+            ["telegram_id", "username", "email", "name", "surname",
+             "gender", "phone", "registered_at"],
+            rows,
+        )
+        file = BufferedInputFile(csv_bytes, filename="users.csv")
+        await call.message.answer_document(
+            file,
+            caption=f"👥 Пользователи: {len(users)}\n"
+                    f"Сформировано: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+        )
+        await call.answer("Файл отправлен")
+        return
+
+    # ---- Поиск ----
+    if action == "search":
+        await call.message.edit_text(
+            "🔍 Отправьте <b>email</b>, <b>@username</b> или <b>Telegram ID</b> пользователя:",
+            parse_mode="HTML",
+        )
+        await state.set_state(Admin.search_user)
+        return
+
+    # ---- Страница списка ----
+    try:
+        page = int(action)
+    except ValueError:
+        page = 0
+
+    text, kb = build_users_page(page)
+    if kb is None:
+        await call.message.edit_text(text)
+    else:
+        await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+
+
+@dp.message(Admin.search_user)
+async def admin_users_search_input(message: Message, state: FSMContext):
+    """Принимает email / @username / ID для поиска."""
+    query = message.text.strip().lower()
+    await state.clear()
+
+    found = []
+    for uid, u in users.items():
+        # по ID
+        if query == str(uid):
+            found.append((uid, u))
+            continue
+        # по email
+        email = (u.get("email") or "").lower()
+        if email and query in email:
+            found.append((uid, u))
+            continue
+        # по username (без @ или с @)
+        username = (u.get("username") or "").lower()
+        clean_query = query.lstrip("@")
+        if username and clean_query in username:
+            found.append((uid, u))
+
+    if not found:
+        await message.answer(
+            f"❌ Никого не найдено по запросу: <code>{query}</code>\n\n"
+            "Попробуйте email, @username или Telegram ID.",
+            parse_mode="HTML",
+        )
+        return
+
+    text = f"🔍 Найдено: <b>{len(found)}</b>\n\n"
+    for uid, u in found[:10]:
+        text += format_user_info(uid, u)
+        text += "➖➖➖➖➖➖➖➖➖➖\n"
+
+    if len(found) > 10:
+        text += f"\n<i>...и ещё {len(found) - 10} — сузьте запрос</i>"
+
+    await message.answer(text, parse_mode="HTML")
+
+
+# ================== РАССЫЛКА ==================
 @dp.callback_query(F.data == "admin:broadcast")
 async def admin_broadcast_start(call: CallbackQuery, state: FSMContext):
     await call.message.edit_text(
@@ -899,6 +1087,7 @@ async def admin_broadcast_send(message: Message, state: FSMContext):
     await state.clear()
 
 
+# ================== ПОИСК БИЛЕТА ==================
 @dp.callback_query(F.data == "admin:find_ticket")
 async def admin_find_ticket(call: CallbackQuery, state: FSMContext):
     await call.message.edit_text("🎫 Отправь код билета:")
@@ -937,7 +1126,6 @@ async def admin_mark_used(call: CallbackQuery):
         tickets[code]["used"] = True
         save_data()
         await call.message.edit_text(f"✅ {code} — использован.")
-
 
 # ================== ЗАПУСК ==================
 

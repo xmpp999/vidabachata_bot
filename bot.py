@@ -893,7 +893,9 @@ async def admin_delete_confirm(call: CallbackQuery, state: FSMContext):
     save_data()
     await call.message.edit_text("✅ Удалено.")
     await show_admin_menu(call.message, state)
-    @dp.callback_query(F.data == "admin:stats")
+
+    
+@dp.callback_query(F.data == "admin:stats")
 async def admin_stats(call: CallbackQuery):
     total = sum(o["price"] for o in orders)
     await call.message.edit_text(

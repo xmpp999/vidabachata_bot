@@ -779,24 +779,32 @@ async def add_title(message: Message, state: FSMContext):
 
 @dp.message(Admin.add_date_text)
 async def add_date_text(message: Message, state: FSMContext):
-    await state.update_data(date_text=message.text.strip())
-    await state.set_state(Admin.add_start_dt)
-    await message.answer("Шаг 3/8. Точная дата <code>ГГГГ-ММ-ДД ЧЧ:ММ</code>:", parse_mode="HTML")
+    text = message.text.strip()
+    dt, date_text = parse_event_date(text)
 
-
-@dp.message(Admin.add_start_dt)
-async def add_start_dt(message: Message, state: FSMContext):
-    try:
-        dt = datetime.strptime(message.text.strip(), "%Y-%m-%d %H:%M")
-    except ValueError:
-        await message.answer("❌ Формат: 2026-11-15 22:00")
+    if dt is None:
+        await message.answer(
+            "❌ Не могу распознать дату.\n\n"
+            "Попробуй один из форматов:\n"
+            "• <code>15.11.2026 22:00</code>\n"
+            "• <code>15/11/2026 22:00</code>\n"
+            "• <code>15 ноября 2026, 22:00</code>\n"
+            "• <code>15 ноября 22:00</code>",
+            parse_mode="HTML",
+        )
         return
+
     if dt < datetime.now():
-        await message.answer("❌ Дата в прошлом.")
+        await message.answer("❌ Дата уже в прошлом. Введи будущую дату.")
         return
-    await state.update_data(start_dt=dt.isoformat())
+
+    await state.update_data(start_dt=dt.isoformat(), date_text=date_text)
     await state.set_state(Admin.add_place)
-    await message.answer("Шаг 4/8. Место:")
+    await message.answer(
+        f"✅ Распознано: <b>{date_text}</b>\n\n"
+        f"Шаг 4/8. Место проведения:",
+        parse_mode="HTML",
+    )
 
 
 @dp.message(Admin.add_place)

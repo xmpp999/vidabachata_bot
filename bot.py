@@ -891,8 +891,8 @@ async def admin_delete_confirm(call: CallbackQuery, state: FSMContext):
     global events
     events = [e for e in events if e["id"] != eid]
     save_data()
-await call.message.edit_text("✅ Удалено.")
-await show_admin_menu(call.message, state)
+    await call.message.edit_text("✅ Удалено.")
+    await show_admin_menu(call.message, state)
 
 
 @dp.callback_query(F.data == "admin:stats")

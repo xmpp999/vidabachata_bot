@@ -777,7 +777,15 @@ async def admin_add_start(call: CallbackQuery, state: FSMContext):
 async def add_title(message: Message, state: FSMContext):
     await state.update_data(title=message.text.strip())
     await state.set_state(Admin.add_date_text)
-    await message.answer("Шаг 2/8. Дата текстом (например: 15 ноября 2026, 22:00):")
+    await message.answer(
+        "Шаг 2/7. Введите <b>дату и время</b> события в любой удобной форме:\n\n"
+        "Например:\n"
+        "• <code>15.11.2026 22:00</code>\n"
+        "• <code>15/11/2026 22:00</code>\n"
+        "• <code>15 ноября 2026, 22:00</code>\n"
+        "• <code>15 ноября 22:00</code>",
+        parse_mode="HTML",
+    )
 
 
 @dp.message(Admin.add_date_text)

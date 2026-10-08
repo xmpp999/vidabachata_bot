@@ -767,8 +767,11 @@ async def admin_report(call: CallbackQuery):
 async def admin_add_start(call: CallbackQuery, state: FSMContext):
     await state.clear()
     await state.set_state(Admin.add_title)
-    await call.message.edit_text("➕ Шаг 1/8. <b>Название события:</b>", parse_mode="HTML")
-
+    await call.message.edit_text(
+        "➕ <b>Новое событие</b>\n\n"
+        "Шаг 1/7. Введите <b>название</b> события:",
+        parse_mode="HTML",
+    )
 
 @dp.message(Admin.add_title)
 async def add_title(message: Message, state: FSMContext):

@@ -10,12 +10,13 @@ import os
 import random
 import re
 import uuid
-import dateparser
 from datetime import datetime, timedelta
 from email.message import EmailMessage
 
 import aiosmtplib
+import dateparser
 import qrcode
+import resend
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command, CommandObject
 from aiogram.fsm.context import FSMContext
@@ -35,6 +36,10 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 BOT_USERNAME = os.getenv("BOT_USERNAME", "your_bot")
 
+# Resend API (для отправки email)
+RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
+
+# Старые SMTP-переменные — можно оставить, они больше не используются
 SMTP_HOST = os.getenv("SMTP_HOST", "smtp.mail.ru")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "465"))
 SMTP_USER = os.getenv("SMTP_USER", "")
@@ -49,6 +54,7 @@ dp = Dispatcher()
 
 # ================== ХРАНИЛИЩЕ ==================
 users = {}
+codes = {}
 username_index = {}
 pending_invites = {}
 tickets = {}
@@ -67,8 +73,8 @@ def save_data():
         "events": events,
         "orders": orders,
         "tickets": tickets,
+        "users": {str(k): v for k, v in users.items()},
         "settings": settings,
-        "users": {str(uid): u for uid, u in users.items()},   # ← НОВОЕ
     }
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
@@ -83,47 +89,42 @@ def load_data():
             orders = data.get("orders", [])
             tickets = data.get("tickets", {})
             settings.update(data.get("settings", {}))
-
-            # Восстанавливаем users (ключи в JSON — строки, конвертируем в int)
-            raw_users = data.get("users", {})
-            users = {int(uid): u for uid, u in raw_users.items()}
-
-            # Перестраиваем username_index
-            username_index = {}
+            users_raw = data.get("users", {})
+            users = {int(k): v for k, v in users_raw.items()}
             for uid, u in users.items():
                 uname = (u.get("username") or "").lower()
                 if uname:
                     username_index[uname] = uid
-
-            print(f"✅ Загружено: {len(events)} событий, {len(orders)} заказов, {len(users)} юзеров")
+            print(
+                f"✅ Загружено: {len(events)} событий, "
+                f"{len(orders)} заказов, {len(users)} юзеров"
+            )
     except FileNotFoundError:
         print("ℹ️ Файл данных не найден, начинаем с чистого листа")
 
 
 # ================== УТИЛИТЫ ==================
-
 def is_valid_email(email: str) -> bool:
     return re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email) is not None
+
 
 def parse_event_date(text: str):
     """Парсит дату в свободной форме. Возвращает (datetime, date_text) или (None, None)."""
     settings_parser = {
-        "DATE_ORDER": "DMY",           # день-месяц-год (для РФ)
-        "PREFER_DATES_FROM": "future", # если год не указан — берём будущий
+        "DATE_ORDER": "DMY",
+        "PREFER_DATES_FROM": "future",
         "RETURN_AS_TIMEZONE_AWARE": False,
     }
     dt = dateparser.parse(text, languages=["ru", "en"], settings=settings_parser)
     if dt is None:
         return None, None
 
-    # Красивая «человеческая» дата для показа юзерам
     months_ru = {
         1: "января", 2: "февраля", 3: "марта", 4: "апреля",
         5: "мая", 6: "июня", 7: "июля", 8: "августа",
         9: "сентября", 10: "октября", 11: "ноября", 12: "декабря",
     }
     date_text = f"{dt.day} {months_ru[dt.month]} {dt.year}, {dt.strftime('%H:%M')}"
-
     return dt, date_text
 
 
@@ -161,20 +162,50 @@ def make_csv(headers, rows) -> bytes:
 
 
 def format_user_info(user_id: int, u: dict) -> str:
-    """Форматирует информацию о пользователе для отображения в Telegram."""
     return (
         f"👤 <b>{u.get('name', '—')} {u.get('surname', '—')}</b>\n"
         f"🆔 <code>{user_id}</code>\n"
-        f"📧 {u.get('email') or '—'}\n"
+        f"📧 {u.get('email', '—') or '—'}\n"
         f"📱 {u.get('phone', '—')}\n"
         f"⚧ {u.get('gender', '—')}\n"
-        f"🔗 @{u.get('username') or '—'}\n"
+        f"🔗 @{u.get('username', '—') or '—'}\n"
         f"📅 {u.get('registered_at', '—')}\n"
     )
 
 
+async def send_email_code(email: str, code: str) -> bool:
+    """Отправляет код подтверждения через Resend API."""
+    if not RESEND_API_KEY:
+        print(f"[EMAIL] RESEND_API_KEY не задан, код для {email}: {code}")
+        return False
+
+    resend.api_key = RESEND_API_KEY
+
+    try:
+        result = await asyncio.to_thread(
+            resend.Emails.send,
+            {
+                "from": "onboarding@resend.dev",
+                "to": email,
+                "subject": "Код подтверждения регистрации",
+                "html": (
+                    f"<p>Здравствуйте!</p>"
+                    f"<p>Ваш код подтверждения: "
+                    f"<b style='font-size:20px;letter-spacing:3px'>{code}</b></p>"
+                    f"<p>Введите его в боте.</p>"
+                    f"<p>— Vida Bachata 💃</p>"
+                ),
+            },
+        )
+        print(f"[EMAIL] Код отправлен на {email}: {result}")
+        return True
+    except Exception as e:
+        print(f"[EMAIL] Ошибка отправки на {email}: {e}")
+        return False
+
+
 async def send_report_to_admin():
-    """Отправляет отчёт админу на email (через SMTP — может не работать на Railway)."""
+    """Отправляет отчёт админу на email."""
     users_rows = [[
         uid, u.get("username", ""), u.get("email", ""),
         u.get("name", ""), u.get("surname", ""), u.get("gender", ""),
@@ -239,14 +270,15 @@ async def send_report_to_admin():
     except Exception as e:
         print(f"[EMAIL] Ошибка: {e}")
 
-# ================== СОСТОЯНИЯ ==================
 
+# ================== СОСТОЯНИЯ ==================
 class Reg(StatesGroup):
-    phone = State()
+    email = State()
+    code = State()
     name = State()
     surname = State()
     gender = State()
-    email = State()
+    phone = State()
     confirm = State()
     ticket_type = State()
     partner_input = State()
@@ -257,7 +289,6 @@ class Admin(StatesGroup):
     menu = State()
     add_title = State()
     add_date_text = State()
-    add_start_dt = State()
     add_place = State()
     add_description = State()
     add_price_single = State()
@@ -266,16 +297,24 @@ class Admin(StatesGroup):
     delete_select = State()
     find_ticket = State()
     broadcast = State()
-    search_user = State()
     settings_edit = State()
+    search_user = State()
 
 
 # ================== /start ==================
 @dp.message(CommandStart(deep_link=True))
 async def start_with_invite(message: Message, state: FSMContext, command: CommandObject):
     await state.clear()
-    payload = command.args or ""
 
+    # Админ не регистрируется
+    if message.from_user.id == ADMIN_ID:
+        return await start(message, state)
+
+    # Уже зарегистрирован — не надо заново
+    if message.from_user.id in users:
+        return await start(message, state)
+
+    payload = command.args or ""
     if payload.startswith("invite_"):
         try:
             inviter_id = int(payload.replace("invite_", ""))
@@ -289,23 +328,57 @@ async def start_with_invite(message: Message, state: FSMContext, command: Comman
                 "с пригласившим.",
             )
 
-    await ask_phone(message, state)
+    await message.answer("📧 Введите ваш Email:")
+    await state.set_state(Reg.email)
 
 
 @dp.message(CommandStart())
 async def start(message: Message, state: FSMContext):
     await state.clear()
+    user_id = message.from_user.id
     user_name = message.from_user.first_name or "друг"
 
+    # ============ АДМИН ============
+    if user_id == ADMIN_ID:
+        greeting = (
+            f"Привет, {user_name} 👋\n"
+            "Вы вошли как <b>администратор</b>.\n\n"
+            "Используйте панель ниже для управления ботом."
+        )
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🛠 Админ-панель", callback_data="admin:back")],
+            [InlineKeyboardButton(text="🎉 Мероприятия", callback_data="show_events")],
+        ])
+        await message.answer(greeting, reply_markup=kb, parse_mode="HTML")
+        return
+
+    # ============ ЗАРЕГИСТРИРОВАННЫЙ ПОЛЬЗОВАТЕЛЬ ============
+    if user_id in users:
+        greeting = (
+            f"Привет, {user_name} 👋\n"
+            "Здесь можно купить билет на вечеринки <b>Vida Bachata</b> 💃🕺\n\n"
+            "Выберите мероприятие:\n\n"
+            "Подпишитесь на соцсети:\n"
+            "ВК (https://vk.com/vidabachata) • "
+            "Telegram (https://t.me/+eTMoEG6V1883Nzli)"
+        )
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🎉 Мероприятия", callback_data="show_events")],
+            [InlineKeyboardButton(text="ВК", url="https://vk.com/vidabachata"),
+             InlineKeyboardButton(text="Telegram", url="https://t.me/+eTMoEG6V1883Nzli")],
+        ])
+        await message.answer(greeting, reply_markup=kb, parse_mode="HTML")
+        return
+
+    # ============ НОВЫЙ ПОЛЬЗОВАТЕЛЬ ============
     greeting = (
         f"Привет, {user_name} 👋\n"
         "Здесь можно купить билет на вечеринки <b>Vida Bachata</b> 💃🕺\n\n"
-        "Зарегистрируйтесь или нажмите «Мероприятия».\n\n"
+        "Зарегистрируйтесь или посмотрите мероприятия.\n\n"
         "Подпишитесь на соцсети:\n"
         "ВК (https://vk.com/vidabachata) • "
         "Telegram (https://t.me/+eTMoEG6V1883Nzli)"
     )
-
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📝 Зарегистрироваться", callback_data="start_registration")],
         [InlineKeyboardButton(text="🎉 Мероприятия", callback_data="show_events")],
@@ -317,6 +390,12 @@ async def start(message: Message, state: FSMContext):
 
 @dp.callback_query(F.data == "start_registration")
 async def start_registration(call: CallbackQuery, state: FSMContext):
+    # Админ не регистрируется
+    if call.from_user.id == ADMIN_ID:
+        await call.answer("Вы администратор, регистрация не нужна 👍", show_alert=True)
+        return
+
+    # Уже зарегистрирован
     if call.from_user.id in users:
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🎉 Мероприятия", callback_data="show_events")],
@@ -327,50 +406,42 @@ async def start_registration(call: CallbackQuery, state: FSMContext):
         )
         return
 
-    await ask_phone(call.message, state)
-
-
-async def ask_phone(message: Message, state: FSMContext):
-    """Запрашивает у пользователя контакт через кнопку «Поделиться»."""
-    kb = ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="📱 Поделиться контактом", request_contact=True)]],
-        resize_keyboard=True,
-        one_time_keyboard=True,
-    )
-    await message.answer(
-        "Нажмите кнопку «Поделиться контактом» внизу, "
-        "чтобы отправить свой номер телефона 👇",
-        reply_markup=kb,
-    )
-    await state.set_state(Reg.phone)
+    await call.message.answer("📧 Введите ваш Email:")
+    await state.set_state(Reg.email)
 
 
 # ================== РЕГИСТРАЦИЯ ==================
-@dp.message(Reg.phone, F.contact)
-async def get_phone(message: Message, state: FSMContext):
-    contact = message.contact
-    if contact.user_id and contact.user_id != message.from_user.id:
-        await message.answer("Пожалуйста, отправьте свой собственный контакт.")
+@dp.message(Reg.email)
+async def get_email(message: Message, state: FSMContext):
+    email = message.text.strip()
+    if not is_valid_email(email):
+        await message.answer("❌ Неверный email. Попробуйте ещё раз:")
         return
-
-    await state.update_data(phone=contact.phone_number)
+    code = f"{random.randint(100000, 999999)}"
+    codes[message.from_user.id] = code
+    await state.update_data(email=email)
+    await send_email_code(email, code)
     await message.answer(
-        "✅ Телефон получен!\n\nОтправьте ответным сообщением своё Имя.",
-        reply_markup=ReplyKeyboardRemove(),
+        "📨 На почту отправлен код. Отправьте его сюда.\n"
+        "Если не нашли — проверьте Спам."
     )
+    await state.set_state(Reg.code)
+
+
+@dp.message(Reg.code)
+async def check_code(message: Message, state: FSMContext):
+    if message.text.strip() != codes.get(message.from_user.id):
+        await message.answer("❌ Неверный код.")
+        return
+    await message.answer("✅ Email подтверждён!\n\nОтправьте ваше Имя.")
     await state.set_state(Reg.name)
-
-
-@dp.message(Reg.phone)
-async def wrong_phone(message: Message):
-    await message.answer("Нажмите кнопку «Поделиться контактом» 👇")
 
 
 @dp.message(Reg.name)
 async def get_name(message: Message, state: FSMContext):
     name = message.text.strip()
     if len(name) < 2:
-        await message.answer("Слишком короткое имя, попробуйте ещё раз:")
+        await message.answer("Слишком короткое имя:")
         return
     await state.update_data(name=name)
     await message.answer("Отправьте вашу Фамилию.")
@@ -381,7 +452,7 @@ async def get_name(message: Message, state: FSMContext):
 async def get_surname(message: Message, state: FSMContext):
     surname = message.text.strip()
     if len(surname) < 2:
-        await message.answer("Слишком короткая фамилия, попробуйте ещё раз:")
+        await message.answer("Слишком короткая фамилия:")
         return
     await state.update_data(surname=surname)
     kb = InlineKeyboardMarkup(inline_keyboard=[[
@@ -396,51 +467,41 @@ async def get_surname(message: Message, state: FSMContext):
 async def get_gender(call: CallbackQuery, state: FSMContext):
     gender = "Мужской" if call.data == "gender:M" else "Женский"
     await state.update_data(gender=gender)
+    kb = ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="📱 Поделиться контактом", request_contact=True)]],
+        resize_keyboard=True, one_time_keyboard=True,
+    )
     await call.message.edit_text(f"Пол: {gender}")
     await call.message.answer(
-        "📧 Отправьте свой email — он понадобится для новостей и чеков.\n\n"
-        "Или отправьте <code>-</code>, чтобы пропустить этот шаг.",
-        parse_mode="HTML",
+        "Нажмите «Поделиться» и отправьте контакт:",
+        reply_markup=kb,
     )
-    await state.set_state(Reg.email)
+    await state.set_state(Reg.phone)
 
 
-@dp.message(Reg.email)
-async def get_email(message: Message, state: FSMContext):
-    email = message.text.strip()
-
-    if email == "-":
-        await state.update_data(email="")
-    elif not is_valid_email(email):
-        await message.answer(
-            "❌ Неверный email. Попробуйте ещё раз или отправьте <code>-</code>.",
-            parse_mode="HTML",
-        )
-        return
-    else:
-        await state.update_data(email=email)
-
-    await show_confirmation(message, state)
-
-
-async def show_confirmation(message: Message, state: FSMContext):
+@dp.message(Reg.phone, F.contact)
+async def get_phone(message: Message, state: FSMContext):
+    await state.update_data(phone=message.contact.phone_number)
     data = await state.get_data()
-    email_line = f"📧 {data['email']}\n" if data.get("email") else ""
-
     text = (
-        "📋 <b>Проверьте ваши данные:</b>\n\n"
-        f"📱 {data['phone']}\n"
+        "📋 <b>Проверьте данные:</b>\n\n"
+        f"📧 {data['email']}\n"
         f"👤 {data['name']} {data['surname']}\n"
         f"⚧ {data['gender']}\n"
-        f"{email_line}"
+        f"📱 {data['phone']}"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Согласен", callback_data="confirm_yes")],
         [InlineKeyboardButton(text="🔄 Перезаполнить", callback_data="confirm_restart")],
     ])
-    await message.answer(text, parse_mode="HTML")
+    await message.answer(text, reply_markup=ReplyKeyboardRemove(), parse_mode="HTML")
     await message.answer("Всё верно?", reply_markup=kb)
     await state.set_state(Reg.confirm)
+
+
+@dp.message(Reg.phone)
+async def wrong_phone(message: Message):
+    await message.answer("Нажмите кнопку «Поделиться контактом» 👇")
 
 
 @dp.callback_query(F.data == "confirm_yes", Reg.confirm)
@@ -452,7 +513,7 @@ async def confirm_yes(call: CallbackQuery, state: FSMContext):
     if call.from_user.username:
         username_index[call.from_user.username.lower()] = call.from_user.id
 
-    save_data()   # ← НОВОЕ: сохраняем сразу после регистрации
+    save_data()
 
     inviter_id = pending_invites.pop(call.from_user.id, None)
     if inviter_id and inviter_id in users:
@@ -480,12 +541,11 @@ async def confirm_restart(call: CallbackQuery, state: FSMContext):
     if call.from_user.username:
         username_index.pop(call.from_user.username.lower(), None)
     await state.clear()
-    await call.message.edit_text("🔄 Начинаем заново.")
-    await ask_phone(call.message, state)
+    await call.message.edit_text("🔄 Начинаем заново.\n\n📧 Введите Email:")
+    await state.set_state(Reg.email)
 
 
 # ================== МЕРОПРИЯТИЯ ==================
-
 @dp.callback_query(F.data == "show_events")
 async def show_events(call: CallbackQuery):
     now = datetime.now()
@@ -559,8 +619,8 @@ async def event_selected(call: CallbackQuery, state: FSMContext):
 
     await state.set_state(Reg.ticket_type)
 
-# ================== ОПЛАТА ==================
 
+# ================== ОПЛАТА ==================
 async def go_to_payment(message: Message, state: FSMContext):
     data = await state.get_data()
     price = data.get("price", 0)
@@ -720,7 +780,6 @@ async def cancel_order(call: CallbackQuery, state: FSMContext):
 
 
 # ================== АДМИН ==================
-
 @dp.message(Command("admin"))
 async def admin_start(message: Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID:
@@ -735,7 +794,7 @@ async def show_admin_menu(message: Message, state: FSMContext):
         [InlineKeyboardButton(text="➕ Создать событие", callback_data="admin:add")],
         [InlineKeyboardButton(text="🗑 Удалить событие", callback_data="admin:delete")],
         [InlineKeyboardButton(text="📋 Список событий", callback_data="admin:list")],
-        [InlineKeyboardButton(text="👥 Пользователи", callback_data="admin:users:0")],   # ← НОВАЯ
+        [InlineKeyboardButton(text="👥 Пользователи", callback_data="admin:users:0")],
         [InlineKeyboardButton(text="📊 Статистика", callback_data="admin:stats")],
         [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin:broadcast")],
         [InlineKeyboardButton(text="🎫 Найти билет", callback_data="admin:find_ticket")],
@@ -771,6 +830,7 @@ async def admin_add_start(call: CallbackQuery, state: FSMContext):
         "Шаг 1/7. Введите <b>название</b> события:",
         parse_mode="HTML",
     )
+
 
 @dp.message(Admin.add_title)
 async def add_title(message: Message, state: FSMContext):
@@ -903,25 +963,25 @@ async def admin_list(call: CallbackQuery):
         status = "🟢" if e.get("active") else "🔴"
         text += f"{status} <b>{e['title']}</b>\n   📅 {e['date_text']}\n   🆔 <code>{e['id']}</code>\n\n"
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin:back")],
+        [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin:back")],
     ])
     await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
 
 
 @dp.callback_query(F.data == "admin:delete")
-async def admin_delete_list(call: CallbackQuery):
+async def admin_delete(call: CallbackQuery, state: FSMContext):
     if not events:
         await call.message.edit_text("📭 Нет событий.")
         return
     buttons = []
     for e in events:
         buttons.append([InlineKeyboardButton(
-            text=f"🗑 {e['title']}",
+            text=f"🗑 {e['title']} — {e['date_text']}",
             callback_data=f"admin:del:{e['id']}"
         )])
-    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="admin:back")])
+    buttons.append([InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin:back")])
     await call.message.edit_text(
-        "🗑 Выбери событие:",
+        "🗑 Выберите событие для удаления:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
     )
 
@@ -929,8 +989,7 @@ async def admin_delete_list(call: CallbackQuery):
 @dp.callback_query(F.data.startswith("admin:del:"))
 async def admin_delete_confirm(call: CallbackQuery, state: FSMContext):
     eid = call.data.split(":")[2]
-    global events
-    events = [e for e in events if e["id"] != eid]
+    events[:] = [e for e in events if e["id"] != eid]   # ← меняем список на месте, без global
     save_data()
     await call.message.edit_text("✅ Удалено.")
     await show_admin_menu(call.message, state)
@@ -938,23 +997,45 @@ async def admin_delete_confirm(call: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data == "admin:stats")
 async def admin_stats(call: CallbackQuery):
-    total = sum(o["price"] for o in orders)
-    await call.message.edit_text(
+    total_revenue = sum(o["price"] for o in orders)
+    paid_orders = len(orders)
+    tickets_active = sum(1 for t in tickets.values() if not t.get("used"))
+    tickets_used = sum(1 for t in tickets.values() if t.get("used"))
+
+    # Продажи по событиям
+    by_event = {}
+    for o in orders:
+        title = o.get("event_title", "—")
+        by_event.setdefault(title, {"count": 0, "sum": 0})
+        by_event[title]["count"] += 1
+        by_event[title]["sum"] += o["price"]
+
+    text = (
         f"📊 <b>Статистика</b>\n\n"
-        f"👥 Юзеров: {len(users)}\n"
-        f"🎫 Заказов: {len(orders)}\n"
-        f"💰 Выручка: {total} ₽\n"
-        f"🎟 Билетов: {len(tickets)}",
-        parse_mode="HTML",
+        f"👥 Пользователей: <b>{len(users)}</b>\n"
+        f"🎉 Событий: <b>{len(events)}</b>\n"
+        f"🛒 Заказов: <b>{paid_orders}</b>\n"
+        f"💰 Выручка: <b>{total_revenue} ₽</b>\n\n"
+        f"🎫 Билетов активно: <b>{tickets_active}</b>\n"
+        f"✅ Билетов использовано: <b>{tickets_used}</b>\n"
     )
 
+    if by_event:
+        text += "\n<b>Продажи по событиям:</b>\n"
+        for title, info in by_event.items():
+            text += f"• {title}: {info['count']} шт, {info['sum']} ₽\n"
 
-# ================== ПОЛЬЗОВАТЕЛИ ==================
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin:back")],
+    ])
+    await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+
+
+# ================== ПОЛЬЗОВАТЕЛИ (АДМИН) ==================
 USERS_PER_PAGE = 5
 
 
 def build_users_page(page: int):
-    """Строит страницу со списком пользователей и клавиатуру."""
     user_ids = list(users.keys())
     total = len(user_ids)
 
@@ -976,7 +1057,6 @@ def build_users_page(page: int):
         text += format_user_info(uid, u)
         text += "➖➖➖➖➖➖➖➖➖➖\n"
 
-    # Кнопки пагинации
     nav_buttons = []
     if page > 0:
         nav_buttons.append(InlineKeyboardButton(
@@ -1012,28 +1092,21 @@ async def admin_users(call: CallbackQuery, state: FSMContext):
 
     action = call.data.split(":")[2]
 
-    # ---- Экспорт в CSV ----
     if action == "export":
         if not users:
             await call.answer("Нет пользователей", show_alert=True)
             return
-
         rows = []
         for uid, u in users.items():
             rows.append([
-                uid,
-                u.get("username", ""),
-                u.get("email", ""),
-                u.get("name", ""),
-                u.get("surname", ""),
-                u.get("gender", ""),
-                u.get("phone", ""),
+                uid, u.get("username", ""), u.get("email", ""),
+                u.get("name", ""), u.get("surname", ""),
+                u.get("gender", ""), u.get("phone", ""),
                 u.get("registered_at", ""),
             ])
         csv_bytes = make_csv(
             ["telegram_id", "username", "email", "name", "surname",
-             "gender", "phone", "registered_at"],
-            rows,
+             "gender", "phone", "registered_at"], rows,
         )
         file = BufferedInputFile(csv_bytes, filename="users.csv")
         await call.message.answer_document(
@@ -1041,19 +1114,17 @@ async def admin_users(call: CallbackQuery, state: FSMContext):
             caption=f"👥 Пользователи: {len(users)}\n"
                     f"Сформировано: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
         )
-        await call.answer("Файл отправлен")
+        await call.answer("Отправляю файл...")
         return
 
-    # ---- Поиск ----
     if action == "search":
-        await call.message.edit_text(
-            "🔍 Отправьте <b>email</b>, <b>@username</b> или <b>Telegram ID</b> пользователя:",
+        await call.message.answer(
+            "🔍 Отправьте <b>email</b>, <b>@username</b> или <b>Telegram ID</b>:",
             parse_mode="HTML",
         )
         await state.set_state(Admin.search_user)
         return
 
-    # ---- Страница списка ----
     try:
         page = int(action)
     except ValueError:
@@ -1068,31 +1139,23 @@ async def admin_users(call: CallbackQuery, state: FSMContext):
 
 @dp.message(Admin.search_user)
 async def admin_users_search_input(message: Message, state: FSMContext):
-    """Принимает email / @username / ID для поиска."""
     query = message.text.strip().lower()
-    await state.clear()
+    await state.set_state(Admin.menu)
 
     found = []
     for uid, u in users.items():
-        # по ID
         if query == str(uid):
             found.append((uid, u))
             continue
-        # по email
         email = (u.get("email") or "").lower()
-        if email and query in email:
-            found.append((uid, u))
-            continue
-        # по username (без @ или с @)
         username = (u.get("username") or "").lower()
-        clean_query = query.lstrip("@")
-        if username and clean_query in username:
+        query_clean = query.lstrip("@")
+        if query_clean and (query_clean in email or query_clean in username):
             found.append((uid, u))
 
     if not found:
         await message.answer(
-            f"❌ Никого не найдено по запросу: <code>{query}</code>\n\n"
-            "Попробуйте email, @username или Telegram ID.",
+            f"❌ Никого не найдено по запросу: <code>{query}</code>",
             parse_mode="HTML",
         )
         return
@@ -1102,81 +1165,128 @@ async def admin_users_search_input(message: Message, state: FSMContext):
         text += format_user_info(uid, u)
         text += "➖➖➖➖➖➖➖➖➖➖\n"
 
-    if len(found) > 10:
-        text += f"\n<i>...и ещё {len(found) - 10} — сузьте запрос</i>"
-
     await message.answer(text, parse_mode="HTML")
 
 
 # ================== РАССЫЛКА ==================
 @dp.callback_query(F.data == "admin:broadcast")
 async def admin_broadcast_start(call: CallbackQuery, state: FSMContext):
+    if not users:
+        await call.answer("Нет пользователей", show_alert=True)
+        return
     await call.message.edit_text(
-        f"📢 Получателей: {len(users)}\n\nОтправь текст:"
+        f"📢 Отправьте сообщение для рассылки.\n\n"
+        f"Получателей: <b>{len(users)}</b>\n\n"
+        f"Поддерживается HTML: &lt;b&gt;жирный&lt;/b&gt;, &lt;i&gt;курсив&lt;/i&gt;\n\n"
+        f"Для отмены — /admin",
+        parse_mode="HTML",
     )
     await state.set_state(Admin.broadcast)
 
 
 @dp.message(Admin.broadcast)
 async def admin_broadcast_send(message: Message, state: FSMContext):
-    sent = failed = 0
-    for uid in users:
+    if message.text == "/admin":
+        await state.clear()
+        await show_admin_menu(message, state)
+        return
+
+    text = message.html_text if message.text else None
+    if not text:
+        await message.answer("❌ Отправьте текстовое сообщение.")
+        return
+
+    sent = 0
+    failed = 0
+    await message.answer(f"📢 Начинаю рассылку на {len(users)} чел...")
+
+    for uid in list(users.keys()):
         try:
-            await bot.send_message(uid, message.text, parse_mode="HTML")
+            await bot.send_message(uid, text, parse_mode="HTML")
             sent += 1
         except Exception:
             failed += 1
-    await message.answer(f"✅ Отправлено: {sent}, ошибок: {failed}")
+        await asyncio.sleep(0.05)
+
+    await message.answer(
+        f"✅ Рассылка завершена.\n\n"
+        f"Отправлено: {sent}\n"
+        f"Ошибок: {failed}"
+    )
     await state.clear()
+    await show_admin_menu(message, state)
 
 
 # ================== ПОИСК БИЛЕТА ==================
 @dp.callback_query(F.data == "admin:find_ticket")
-async def admin_find_ticket(call: CallbackQuery, state: FSMContext):
-    await call.message.edit_text("🎫 Отправь код билета:")
+async def admin_find_ticket_start(call: CallbackQuery, state: FSMContext):
+    await call.message.edit_text(
+        "🎫 Отправьте код билета (например: <code>VIDA-XXXX-XXXX</code>)\n\n"
+        "Для отмены — /admin",
+        parse_mode="HTML",
+    )
     await state.set_state(Admin.find_ticket)
 
 
 @dp.message(Admin.find_ticket)
-async def admin_find_ticket_check(message: Message, state: FSMContext):
+async def admin_find_ticket(message: Message, state: FSMContext):
+    if message.text == "/admin":
+        await state.clear()
+        await show_admin_menu(message, state)
+        return
+
     code = message.text.strip().upper()
     ticket = tickets.get(code)
+
     if not ticket:
-        await message.answer(f"❌ Не найден: {code}")
+        await message.answer("❌ Билет с таким кодом не найден.")
         return
-    status = "⚠️ Использован" if ticket.get("used") else "✅ Действителен"
+
+    status = "✅ использован" if ticket.get("used") else "🟢 активен"
     text = (
-        f"🎫 <b>{code}</b>\n"
-        f"{status}\n"
+        f"🎫 <b>Билет найден</b>\n\n"
+        f"Код: <code>{code}</code>\n"
+        f"Статус: {status}\n"
         f"Владелец: {ticket['holder']}\n"
-        f"Тип: {ticket['type']}\n"
-        f"ID: {ticket['user_id']}"
+        f"ID: <code>{ticket['user_id']}</code>\n"
+        f"Тип: {'Парный' if ticket['type'] == 'pair' else 'Обычный'}\n"
+        f"Событие: {ticket.get('event_title', '—')}\n"
+        f"Выдан: {ticket.get('issued_at', '—')}\n"
     )
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(
-            text="✅ Отметить использованным",
-            callback_data=f"admin:used:{code}"
-        )],
-    ])
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[])
+    if not ticket.get("used"):
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(
+                text="✅ Отметить как использованный",
+                callback_data=f"admin:use_ticket:{code}"
+            )
+        ]])
+
     await message.answer(text, reply_markup=kb, parse_mode="HTML")
-    await state.clear()
 
 
-@dp.callback_query(F.data.startswith("admin:used:"))
-async def admin_mark_used(call: CallbackQuery):
+@dp.callback_query(F.data.startswith("admin:use_ticket:"))
+async def admin_use_ticket(call: CallbackQuery):
     code = call.data.split(":")[2]
-    if code in tickets:
-        tickets[code]["used"] = True
-        save_data()
-        await call.message.edit_text(f"✅ {code} — использован.")
+    ticket = tickets.get(code)
+    if not ticket:
+        await call.answer("Билет не найден")
+        return
+    ticket["used"] = True
+    save_data()
+    await call.message.edit_text(
+        f"✅ Билет <code>{code}</code> отмечен как использованный.",
+        parse_mode="HTML",
+    )
+
 
 # ================== ЗАПУСК ==================
-
 async def main():
-    print("🚀 Бот запускается...")
     load_data()
-    await bot.delete_webhook(drop_pending_updates=True)
-    print(f"✅ Бот @{BOT_USERNAME} работает")
+    print("🚀 Бот запускается...")
+    me = await bot.get_me()
+    print(f"✅ Бот @{me.username} работает")
     await dp.start_polling(bot)
 
 

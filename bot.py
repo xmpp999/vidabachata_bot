@@ -31,7 +31,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-print(f"[DEBUG] BOT_TOKEN длина: {len(BOT_TOKEN)}, префикс: {BOT_TOKEN[:15]}")
+# print(f"[DEBUG] BOT_TOKEN длина: {len(BOT_TOKEN)}, префикс: {BOT_TOKEN[:15]}")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 BOT_USERNAME = os.getenv("BOT_USERNAME", "your_bot")
 

@@ -111,7 +111,6 @@ def parse_event_date(text: str):
         "DATE_ORDER": "DMY",           # день-месяц-год (для РФ)
         "PREFER_DATES_FROM": "future", # если год не указан — берём будущий
         "RETURN_AS_TIMEZONE_AWARE": False,
-        "LANGUAGES": ["ru", "en"],
     }
     dt = dateparser.parse(text, languages=["ru", "en"], settings=settings_parser)
     if dt is None:

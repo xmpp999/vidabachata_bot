@@ -191,7 +191,7 @@ async def send_report_to_admin():
     except Exception as e:
         print(f"[EMAIL] Ошибка: {e}")
 
-        # ================== СОСТОЯНИЯ ==================
+# ================== СОСТОЯНИЯ ==================
 
 
 class Reg(StatesGroup):

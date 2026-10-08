@@ -105,6 +105,28 @@ def load_data():
 def is_valid_email(email: str) -> bool:
     return re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email) is not None
 
+def parse_event_date(text: str):
+    """Парсит дату в свободной форме. Возвращает (datetime, date_text) или (None, None)."""
+    settings_parser = {
+        "DATE_ORDER": "DMY",           # день-месяц-год (для РФ)
+        "PREFER_DATES_FROM": "future", # если год не указан — берём будущий
+        "RETURN_AS_TIMEZONE_AWARE": False,
+        "LANGUAGES": ["ru", "en"],
+    }
+    dt = dateparser.parse(text, languages=["ru", "en"], settings=settings_parser)
+    if dt is None:
+        return None, None
+
+    # Красивая «человеческая» дата для показа юзерам
+    months_ru = {
+        1: "января", 2: "февраля", 3: "марта", 4: "апреля",
+        5: "мая", 6: "июня", 7: "июля", 8: "августа",
+        9: "сентября", 10: "октября", 11: "ноября", 12: "декабря",
+    }
+    date_text = f"{dt.day} {months_ru[dt.month]} {dt.year}, {dt.strftime('%H:%M')}"
+
+    return dt, date_text
+
 
 def sales_closed(event: dict) -> bool:
     start_dt = datetime.fromisoformat(event["start_dt"])

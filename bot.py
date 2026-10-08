@@ -88,6 +88,7 @@ def load_data():
 
 
 # ================== УТИЛИТЫ ==================
+
 def is_valid_email(email: str) -> bool:
     return re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email) is not None
 
@@ -434,6 +435,7 @@ async def confirm_restart(call: CallbackQuery, state: FSMContext):
     await ask_phone(call.message, state)
 
     # ================== МЕРОПРИЯТИЯ ==================
+
 @dp.callback_query(F.data == "show_events")
 async def show_events(call: CallbackQuery):
     now = datetime.now()
@@ -665,7 +667,9 @@ async def paid(call: CallbackQuery, state: FSMContext):
 async def cancel_order(call: CallbackQuery, state: FSMContext):
     await state.clear()
     await call.message.edit_text("❌ Отменено. /start — заново.")
+    
     # ================== АДМИН ==================
+
 @dp.message(Command("admin"))
 async def admin_start(message: Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID:
@@ -936,6 +940,7 @@ async def admin_mark_used(call: CallbackQuery):
 
 
 # ================== ЗАПУСК ==================
+
 async def main():
     print("🚀 Бот запускается...")
     load_data()

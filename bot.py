@@ -813,7 +813,7 @@ async def add_date_text(message: Message, state: FSMContext):
     await state.set_state(Admin.add_place)
     await message.answer(
         f"✅ Распознано: <b>{date_text}</b>\n\n"
-        f"Шаг 4/8. Место проведения:",
+        f"Шаг 4/7. Место проведения:",
         parse_mode="HTML",
     )
 
@@ -822,14 +822,14 @@ async def add_date_text(message: Message, state: FSMContext):
 async def add_place(message: Message, state: FSMContext):
     await state.update_data(place=message.text.strip())
     await state.set_state(Admin.add_description)
-    await message.answer("Шаг 5/8. Описание:")
+    await message.answer("Шаг 5/7. Описание:")
 
 
 @dp.message(Admin.add_description)
 async def add_description(message: Message, state: FSMContext):
     await state.update_data(description=message.text.strip())
     await state.set_state(Admin.add_price_single)
-    await message.answer("Шаг 6/8. Цена обычного (число):")
+    await message.answer("Шаг 6/7. Цена обычного (число):")
 
 
 @dp.message(Admin.add_price_single)
@@ -843,7 +843,7 @@ async def add_price_single(message: Message, state: FSMContext):
         return
     await state.update_data(price_single=price)
     await state.set_state(Admin.add_price_pair)
-    await message.answer("Шаг 7/8. Цена парного (0 если нет):")
+    await message.answer("Шаг 7/7. Цена парного (0 если нет):")
 
 
 @dp.message(Admin.add_price_pair)
@@ -857,7 +857,7 @@ async def add_price_pair(message: Message, state: FSMContext):
         return
     await state.update_data(price_pair=price)
     await state.set_state(Admin.add_photo)
-    await message.answer("Шаг 8/8. Фото-обложка или <code>-</code>:", parse_mode="HTML")
+    await message.answer("Шаг 8/7. Фото-обложка или <code>-</code>:", parse_mode="HTML")
 
 
 @dp.message(Admin.add_photo, F.photo)

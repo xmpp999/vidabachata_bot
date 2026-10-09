@@ -1,11 +1,11 @@
 """
 Telegram-бот для продажи билетов на вечеринки Vida Bachata.
+Хранилище: Supabase (PostgreSQL).
 """
 
 import asyncio
 import csv
 import io
-import json
 import os
 import random
 import re
@@ -28,6 +28,7 @@ from aiogram.types import (
     ReplyKeyboardRemove,
 )
 from dotenv import load_dotenv
+from supabase import create_client, Client
 
 # ================== КОНФИГ ==================
 load_dotenv()
@@ -36,23 +37,28 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 BOT_USERNAME = os.getenv("BOT_USERNAME", "your_bot")
 
+# Supabase
+SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
+
 # Resend API (для отправки email)
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
 
-# Старые SMTP-переменные — можно оставить, они больше не используются
+# Старые SMTP-переменные — для отчёта на email
 SMTP_HOST = os.getenv("SMTP_HOST", "smtp.mail.ru")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "465"))
 SMTP_USER = os.getenv("SMTP_USER", "")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "")
 
-DATA_FILE = os.getenv("DATA_FILE", "bot_data.json")
-
 # ================== БОТ ==================
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
 
-# ================== ХРАНИЛИЩЕ ==================
+# ================== SUPABASE ==================
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+
+# ================== ХРАНИЛИЩЕ (в памяти, синхронизируется с Supabase) ==================
 users = {}
 codes = {}
 username_index = {}
@@ -69,38 +75,103 @@ settings = {
 
 
 def save_data():
-    data = {
-        "events": events,
-        "orders": orders,
-        "tickets": tickets,
-        "users": {str(k): v for k, v in users.items()},
-        "settings": settings,
-    }
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    """Синхронизирует всё из памяти в Supabase."""
+    try:
+        # ---- USERS ----
+        if users:
+            users_rows = []
+            for uid, u in users.items():
+                users_rows.append({
+                    "user_id": uid,
+                    "username": u.get("username", ""),
+                    "email": u.get("email", ""),
+                    "name": u.get("name", ""),
+                    "surname": u.get("surname", ""),
+                    "gender": u.get("gender", ""),
+                    "phone": u.get("phone", ""),
+                    "registered_at": u.get("registered_at", ""),
+                })
+            supabase.table("users").upsert(users_rows).execute()
+
+        # ---- EVENTS ----
+        if events:
+            supabase.table("events").upsert(events).execute()
+
+        # ---- TICKETS ----
+        if tickets:
+            tickets_rows = []
+            for code, t in tickets.items():
+                tickets_rows.append({
+                    "code": code,
+                    "user_id": t.get("user_id"),
+                    "type": t.get("type", ""),
+                    "holder": t.get("holder", ""),
+                    "used": t.get("used", False),
+                    "event_id": t.get("event_id", ""),
+                    "event_title": t.get("event_title", ""),
+                    "issued_at": t.get("issued_at", ""),
+                })
+            supabase.table("tickets").upsert(tickets_rows).execute()
+
+        # ---- ORDERS ----
+        if orders:
+            supabase.table("orders").upsert(orders).execute()
+
+    except Exception as e:
+        print(f"[SUPABASE] Ошибка сохранения: {e}")
 
 
 def load_data():
-    global events, orders, tickets, settings, users, username_index
+    """Загружает всё из Supabase в память."""
+    global events, orders, tickets, users, username_index
     try:
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            events = data.get("events", [])
-            orders = data.get("orders", [])
-            tickets = data.get("tickets", {})
-            settings.update(data.get("settings", {}))
-            users_raw = data.get("users", {})
-            users = {int(k): v for k, v in users_raw.items()}
-            for uid, u in users.items():
-                uname = (u.get("username") or "").lower()
-                if uname:
-                    username_index[uname] = uid
-            print(
-                f"✅ Загружено: {len(events)} событий, "
-                f"{len(orders)} заказов, {len(users)} юзеров"
-            )
-    except FileNotFoundError:
-        print("ℹ️ Файл данных не найден, начинаем с чистого листа")
+        # ---- USERS ----
+        resp = supabase.table("users").select("*").execute()
+        users = {}
+        username_index = {}
+        for row in resp.data:
+            uid = int(row["user_id"])
+            users[uid] = {
+                "username": row.get("username", ""),
+                "email": row.get("email", ""),
+                "name": row.get("name", ""),
+                "surname": row.get("surname", ""),
+                "gender": row.get("gender", ""),
+                "phone": row.get("phone", ""),
+                "registered_at": row.get("registered_at", ""),
+            }
+            uname = (row.get("username") or "").lower()
+            if uname:
+                username_index[uname] = uid
+
+        # ---- EVENTS ----
+        resp = supabase.table("events").select("*").execute()
+        events = resp.data or []
+
+        # ---- TICKETS ----
+        resp = supabase.table("tickets").select("*").execute()
+        tickets = {}
+        for row in resp.data:
+            tickets[row["code"]] = {
+                "user_id": row.get("user_id"),
+                "type": row.get("type", ""),
+                "holder": row.get("holder", ""),
+                "used": row.get("used", False),
+                "event_id": row.get("event_id", ""),
+                "event_title": row.get("event_title", ""),
+                "issued_at": row.get("issued_at", ""),
+            }
+
+        # ---- ORDERS ----
+        resp = supabase.table("orders").select("*").execute()
+        orders = resp.data or []
+
+        print(
+            f"✅ Загружено из Supabase: {len(events)} событий, "
+            f"{len(orders)} заказов, {len(users)} юзеров, {len(tickets)} билетов"
+        )
+    except Exception as e:
+        print(f"[SUPABASE] Ошибка загрузки: {e}")
 
 
 # ================== УТИЛИТЫ ==================
@@ -138,8 +209,11 @@ def generate_ticket_code() -> str:
     return f"VIDA-{uuid.uuid4().hex[:4].upper()}-{uuid.uuid4().hex[:4].upper()}"
 
 
+
 def next_order_id() -> str:
-    return f"ORD-{len(orders) + 1:04d}"
+    import time
+    return f"ORD-{int(time.time() * 1000) % 10**10:010d}"
+
 
 
 def make_qr_image(data: str) -> BufferedInputFile:
@@ -171,7 +245,6 @@ def format_user_info(user_id: int, u: dict) -> str:
         f"🔗 @{u.get('username', '—') or '—'}\n"
         f"📅 {u.get('registered_at', '—')}\n"
     )
-
 
 async def send_email_code(email: str, code: str) -> bool:
     """Отправляет код подтверждения через Resend API."""
@@ -299,7 +372,6 @@ class Admin(StatesGroup):
     broadcast = State()
     settings_edit = State()
     search_user = State()
-
 
 # ================== /start ==================
 @dp.message(CommandStart(deep_link=True))
@@ -618,7 +690,6 @@ async def event_selected(call: CallbackQuery, state: FSMContext):
         await call.message.answer(caption, reply_markup=kb, parse_mode="HTML")
 
     await state.set_state(Reg.ticket_type)
-
 
 # ================== ОПЛАТА ==================
 async def go_to_payment(message: Message, state: FSMContext):
@@ -989,8 +1060,8 @@ async def admin_delete(call: CallbackQuery, state: FSMContext):
 @dp.callback_query(F.data.startswith("admin:del:"))
 async def admin_delete_confirm(call: CallbackQuery, state: FSMContext):
     eid = call.data.split(":")[2]
-    events[:] = [e for e in events if e["id"] != eid]   # ← меняем список на месте, без global
-    save_data()
+    events[:] = [e for e in events if e["id"] != eid]
+    supabase.table("events").delete().eq("id", eid).execute()
     await call.message.edit_text("✅ Удалено.")
     await show_admin_menu(call.message, state)
 
@@ -1002,7 +1073,6 @@ async def admin_stats(call: CallbackQuery):
     tickets_active = sum(1 for t in tickets.values() if not t.get("used"))
     tickets_used = sum(1 for t in tickets.values() if t.get("used"))
 
-    # Продажи по событиям
     by_event = {}
     for o in orders:
         title = o.get("event_title", "—")

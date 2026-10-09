@@ -58,6 +58,23 @@ dp = Dispatcher()
 # ================== SUPABASE ==================
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
+
+# === ДИАГНОСТИКА ===
+import socket
+try:
+    ip = socket.gethostbyname("bttdtvonlxeobozberg.supabase.co")
+    print(f"[DNS TEST] ✅ Домен резолвится: {ip}")
+except Exception as e:
+    print(f"[DNS TEST] ❌ DNS не работает: {e}")
+
+try:
+    import urllib.request
+    urllib.request.urlopen("https://bttdtvonlxeobozberg.supabase.co/rest/v1/", timeout=5)
+    print("[HTTP TEST] ✅ Соединение работает")
+except Exception as e:
+    print(f"[HTTP TEST] ❌ Соединение не работает: {e}")
+# === КОНЕЦ ДИАГНОСТИКИ ===
+
 # ================== ХРАНИЛИЩЕ (в памяти, синхронизируется с Supabase) ==================
 users = {}
 codes = {}

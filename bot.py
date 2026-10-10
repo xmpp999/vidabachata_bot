@@ -964,7 +964,10 @@ async def event_selected(call: CallbackQuery, state: FSMContext):
         await call.answer("Событие не найдено")
         return
 
-    if call.from_user.id not in users:
+    is_admin = (call.from_user.id == ADMIN_ID)
+
+    # Админ может смотреть анонсы без регистрации
+    if not is_admin and call.from_user.id not in users:
         await call.answer("Сначала пройдите регистрацию 📝", show_alert=True)
         return
 
@@ -974,23 +977,35 @@ async def event_selected(call: CallbackQuery, state: FSMContext):
 
     await state.update_data(event_id=eid, event=event)
 
-    buttons = [[InlineKeyboardButton(
-        text=f"🎫 Обычный — {event['price_single']} ₽",
-        callback_data="ticket:single"
-    )]]
-    if event.get("price_pair", 0) > 0:
-        buttons.append([InlineKeyboardButton(
-            text=f"💑 Парный — {event['price_pair']} ₽",
-            callback_data="ticket:pair"
-        )])
+    if is_admin:
+        # Для админа — только просмотр анонса
+        buttons = [[InlineKeyboardButton(
+            text="🔙 Закрыть",
+            callback_data="admin:back"
+        )]]
+    else:
+        # Для обычного пользователя — покупка
+        buttons = [[InlineKeyboardButton(
+            text=f"🎫 Обычный — {event['price_single']} ₽",
+            callback_data="ticket:single"
+        )]]
+        if event.get("price_pair", 0) > 0:
+            buttons.append([InlineKeyboardButton(
+                text=f"💑 Парный — {event['price_pair']} ₽",
+                callback_data="ticket:pair"
+            )])
 
     caption = (
         f"🎉 <b>{event['title']}</b>\n\n"
         f"📅 {event['date_text']}\n"
         f"📍 {event['place']}\n\n"
         f"{event['description']}\n\n"
-        "Выберите тип билета:"
     )
+    if is_admin:
+        caption += "👁 <i>Режим просмотра (админ)</i>"
+    else:
+        caption += "Выберите тип билета:"
+
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
 
     if event.get("photo_id"):
@@ -1002,6 +1017,7 @@ async def event_selected(call: CallbackQuery, state: FSMContext):
         await call.message.answer(caption, reply_markup=kb, parse_mode="HTML")
 
     await state.set_state(Reg.ticket_type)
+
 
 
 # ================== ОПЛАТА ==================
@@ -1178,6 +1194,7 @@ async def show_admin_menu(message: Message, state: FSMContext):
         [InlineKeyboardButton(text="➕ Создать событие", callback_data="admin:add")],
         [InlineKeyboardButton(text="🗑 Удалить событие", callback_data="admin:delete")],
         [InlineKeyboardButton(text="📋 Список событий", callback_data="admin:list")],
+        [InlineKeyboardButton(text="🎉 Анонсы (просмотр)", callback_data="show_events")],
         [InlineKeyboardButton(text="👥 Пользователи", callback_data="admin:users:0")],
         [InlineKeyboardButton(text="🚫 Чёрный список", callback_data="admin:blacklist")],
         [InlineKeyboardButton(text="📊 Попытки регистрации", callback_data="admin:reg_attempts")],

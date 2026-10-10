@@ -1447,6 +1447,13 @@ def start_keepalive():
 async def main():
     load_data()
     print("🚀 Бот запускается...")
+
+    # Запускаем HTTP-сервер для Render (для открытого порта)
+    start_keepalive()
+
+    # Запускаем самопинг (внутри async-цикла)
+    start_self_ping()
+
     me = await bot.get_me()
     print(f"✅ Бот @{me.username} работает")
     await dp.start_polling(bot)

@@ -1389,6 +1389,59 @@ async def admin_use_ticket(call: CallbackQuery):
         parse_mode="HTML",
     )
 
+# === КОСТЫЛЬ ДЛЯ RENDER FREE TIER ===
+# 1. HTTP-сервер на порту, чтобы Render видел "открытый порт"
+# 2. Самопинг для предотвращения засыпания
+
+def start_keepalive_server():
+    """Запускает HTTP-сервер на порту 10000 в фоновом потоке."""
+    PORT = 10000
+
+    class Handler(http.server.SimpleHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"OK")
+
+        def log_message(self, format, *args):
+            pass  # отключаем логи, чтобы не засорять
+
+    with socketserver.TCPServer(("", PORT), Handler) as httpd:
+        print(f"[KEEPALIVE] HTTP-сервер запущен на порту {PORT}")
+        httpd.serve_forever()
+
+
+def start_self_ping():
+    """Пингует собственный URL каждые 10 минут, чтобы Render не засыпал."""
+    render_url = os.getenv("RENDER_EXTERNAL_URL", "")
+    if not render_url:
+        print("[KEEPALIVE] RENDER_EXTERNAL_URL не задан — самопинг отключён")
+        return
+
+    async def ping_loop():
+        while True:
+            await asyncio.sleep(600)  # 10 минут
+            try:
+                # Пингуем синхронно в отдельном потоке, чтобы не блокировать
+                await asyncio.to_thread(urllib.request.urlopen, render_url, timeout=10)
+                print(f"[KEEPALIVE] Самопинг успешен: {render_url}")
+            except Exception as e:
+                print(f"[KEEPALIVE] Самопинг ошибка: {e}")
+
+    asyncio.create_task(ping_loop())
+    print(f"[KEEPALIVE] Самопинг активирован для {render_url}")
+
+
+def start_keepalive():
+    """Запускает и HTTP-сервер, и самопинг."""
+    # HTTP-сервер в отдельном потоке
+    server_thread = threading.Thread(target=start_keepalive_server, daemon=True)
+    server_thread.start()
+
+    # Самопинг (нужно вызвать внутри async-цикла)
+    # См. main() ниже
+# === КОНЕЦ КОСТЫЛЯ ===
 
 # ================== ЗАПУСК ==================
 async def main():

@@ -426,15 +426,22 @@ async def start(message: Message, state: FSMContext):
         greeting = (
             f"Привет, {user_name} 👋\n"
             "Вы вошли как <b>администратор</b>.\n\n"
-            "Используйте панель ниже для управления ботом."
+            "Используйте панель ниже для управления ботом.\n\n"
+            "Подпишитесь на соцсети:\n"
+            "ВК (https://vk.com/vidabachata) • "
+            "Telegram (https://t.me/+eTMoEG6V1883Nzli)"
         )
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🛠 Админ-панель", callback_data="admin:back")],
             [InlineKeyboardButton(text="🎉 Мероприятия", callback_data="show_events")],
+            [InlineKeyboardButton(text="ВК", url="https://vk.com/vidabachata"),
+             InlineKeyboardButton(text="Telegram", url="https://t.me/+eTMoEG6V1883Nzli")],
         ])
         await message.answer(greeting, reply_markup=kb, parse_mode="HTML")
         return
-
+    
+    
+    
     # ============ ЗАРЕГИСТРИРОВАННЫЙ ПОЛЬЗОВАТЕЛЬ ============
     if user_id in users:
         greeting = (

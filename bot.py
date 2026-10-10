@@ -58,23 +58,6 @@ dp = Dispatcher()
 # ================== SUPABASE ==================
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
-
-# === ДИАГНОСТИКА ===
-import socket
-try:
-    ip = socket.gethostbyname("bttdtvonlxeobozberg.supabase.co")
-    print(f"[DNS TEST] ✅ Домен резолвится: {ip}")
-except Exception as e:
-    print(f"[DNS TEST] ❌ DNS не работает: {e}")
-
-try:
-    import urllib.request
-    urllib.request.urlopen("https://bttdtvonlxeobozberg.supabase.co/rest/v1/", timeout=5)
-    print("[HTTP TEST] ✅ Соединение работает")
-except Exception as e:
-    print(f"[HTTP TEST] ❌ Соединение не работает: {e}")
-# === КОНЕЦ ДИАГНОСТИКИ ===
-
 # ================== ХРАНИЛИЩЕ (в памяти, синхронизируется с Supabase) ==================
 users = {}
 codes = {}
@@ -226,11 +209,9 @@ def generate_ticket_code() -> str:
     return f"VIDA-{uuid.uuid4().hex[:4].upper()}-{uuid.uuid4().hex[:4].upper()}"
 
 
-
 def next_order_id() -> str:
     import time
     return f"ORD-{int(time.time() * 1000) % 10**10:010d}"
-
 
 
 def make_qr_image(data: str) -> BufferedInputFile:
@@ -262,6 +243,7 @@ def format_user_info(user_id: int, u: dict) -> str:
         f"🔗 @{u.get('username', '—') or '—'}\n"
         f"📅 {u.get('registered_at', '—')}\n"
     )
+
 
 async def send_email_code(email: str, code: str) -> bool:
     """Отправляет код подтверждения через Resend API."""
@@ -363,12 +345,11 @@ async def send_report_to_admin():
 
 # ================== СОСТОЯНИЯ ==================
 class Reg(StatesGroup):
-    email = State()
-    code = State()
+    phone = State()
     name = State()
     surname = State()
+    email = State()
     gender = State()
-    phone = State()
     confirm = State()
     ticket_type = State()
     partner_input = State()
@@ -389,6 +370,7 @@ class Admin(StatesGroup):
     broadcast = State()
     settings_edit = State()
     search_user = State()
+
 
 # ================== /start ==================
 @dp.message(CommandStart(deep_link=True))
@@ -417,8 +399,16 @@ async def start_with_invite(message: Message, state: FSMContext, command: Comman
                 "с пригласившим.",
             )
 
-    await message.answer("📧 Введите ваш Email:")
-    await state.set_state(Reg.email)
+    # Сразу начинаем с телефона
+    kb = ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="📱 Поделиться контактом", request_contact=True)]],
+        resize_keyboard=True, one_time_keyboard=True,
+    )
+    await message.answer(
+        "📱 Нажмите «Поделиться контактом», чтобы подтвердить ваш номер телефона:",
+        reply_markup=kb,
+    )
+    await state.set_state(Reg.phone)
 
 
 @dp.message(CommandStart())
@@ -495,35 +485,31 @@ async def start_registration(call: CallbackQuery, state: FSMContext):
         )
         return
 
-    await call.message.answer("📧 Введите ваш Email:")
-    await state.set_state(Reg.email)
+    kb = ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="📱 Поделиться контактом", request_contact=True)]],
+        resize_keyboard=True, one_time_keyboard=True,
+    )
+    await call.message.answer(
+        "📱 Нажмите «Поделиться контактом», чтобы подтвердить ваш номер телефона:",
+        reply_markup=kb,
+    )
+    await state.set_state(Reg.phone)
 
 
 # ================== РЕГИСТРАЦИЯ ==================
-@dp.message(Reg.email)
-async def get_email(message: Message, state: FSMContext):
-    email = message.text.strip()
-    if not is_valid_email(email):
-        await message.answer("❌ Неверный email. Попробуйте ещё раз:")
-        return
-    code = f"{random.randint(100000, 999999)}"
-    codes[message.from_user.id] = code
-    await state.update_data(email=email)
-    await send_email_code(email, code)
+@dp.message(Reg.phone, F.contact)
+async def get_phone(message: Message, state: FSMContext):
+    await state.update_data(phone=message.contact.phone_number)
     await message.answer(
-        "📨 На почту отправлен код. Отправьте его сюда.\n"
-        "Если не нашли — проверьте Спам."
+        "✅ Телефон получен!\n\n👤 Отправьте ваше Имя:",
+        reply_markup=ReplyKeyboardRemove(),
     )
-    await state.set_state(Reg.code)
-
-
-@dp.message(Reg.code)
-async def check_code(message: Message, state: FSMContext):
-    if message.text.strip() != codes.get(message.from_user.id):
-        await message.answer("❌ Неверный код.")
-        return
-    await message.answer("✅ Email подтверждён!\n\nОтправьте ваше Имя.")
     await state.set_state(Reg.name)
+
+
+@dp.message(Reg.phone)
+async def wrong_phone(message: Message):
+    await message.answer("Пожалуйста, нажмите кнопку «Поделиться контактом» 👇")
 
 
 @dp.message(Reg.name)
@@ -533,7 +519,7 @@ async def get_name(message: Message, state: FSMContext):
         await message.answer("Слишком короткое имя:")
         return
     await state.update_data(name=name)
-    await message.answer("Отправьте вашу Фамилию.")
+    await message.answer("👤 Отправьте вашу Фамилию.")
     await state.set_state(Reg.surname)
 
 
@@ -544,11 +530,47 @@ async def get_surname(message: Message, state: FSMContext):
         await message.answer("Слишком короткая фамилия:")
         return
     await state.update_data(surname=surname)
+    await message.answer(
+        "📧 Отправьте ваш Email (для рассылки).\n"
+        "Можно пропустить — отправьте <code>-</code>",
+        parse_mode="HTML",
+    )
+    await state.set_state(Reg.email)
+
+
+@dp.message(Reg.email)
+async def get_email(message: Message, state: FSMContext):
+    email_input = message.text.strip()
+
+    # Пропустить email
+    if email_input == "-":
+        await state.update_data(email="")
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="👨 Мужской", callback_data="gender:M"),
+            InlineKeyboardButton(text="👩 Женский", callback_data="gender:F"),
+        ]])
+        await message.answer("📭 Email пропущен.\n\n⚧ Выберите ваш пол:", reply_markup=kb)
+        await state.set_state(Reg.gender)
+        return
+
+    # Проверка формата email (без отправки кода)
+    if not is_valid_email(email_input):
+        await message.answer(
+            "❌ Похоже, email введён неверно. Попробуйте ещё раз\n"
+            "или отправьте <code>-</code>, чтобы пропустить:",
+            parse_mode="HTML",
+        )
+        return
+
+    await state.update_data(email=email_input)
     kb = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="👨 Мужской", callback_data="gender:M"),
         InlineKeyboardButton(text="👩 Женский", callback_data="gender:F"),
     ]])
-    await message.answer("Выберите ваш пол:", reply_markup=kb)
+    await message.answer(
+        "✅ Email сохранён для рассылки.\n\n⚧ Выберите ваш пол:",
+        reply_markup=kb,
+    )
     await state.set_state(Reg.gender)
 
 
@@ -556,41 +578,24 @@ async def get_surname(message: Message, state: FSMContext):
 async def get_gender(call: CallbackQuery, state: FSMContext):
     gender = "Мужской" if call.data == "gender:M" else "Женский"
     await state.update_data(gender=gender)
-    kb = ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="📱 Поделиться контактом", request_contact=True)]],
-        resize_keyboard=True, one_time_keyboard=True,
-    )
-    await call.message.edit_text(f"Пол: {gender}")
-    await call.message.answer(
-        "Нажмите «Поделиться» и отправьте контакт:",
-        reply_markup=kb,
-    )
-    await state.set_state(Reg.phone)
-
-
-@dp.message(Reg.phone, F.contact)
-async def get_phone(message: Message, state: FSMContext):
-    await state.update_data(phone=message.contact.phone_number)
     data = await state.get_data()
+
+    email_line = data.get("email") or "—"
     text = (
         "📋 <b>Проверьте данные:</b>\n\n"
-        f"📧 {data['email']}\n"
-        f"👤 {data['name']} {data['surname']}\n"
-        f"⚧ {data['gender']}\n"
-        f"📱 {data['phone']}"
+        f"📱 {data.get('phone', '—')}\n"
+        f"👤 {data.get('name', '—')} {data.get('surname', '—')}\n"
+        f"📧 {email_line}\n"
+        f"⚧ {gender}"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Согласен", callback_data="confirm_yes")],
         [InlineKeyboardButton(text="🔄 Перезаполнить", callback_data="confirm_restart")],
     ])
-    await message.answer(text, reply_markup=ReplyKeyboardRemove(), parse_mode="HTML")
-    await message.answer("Всё верно?", reply_markup=kb)
+    await call.message.edit_text(f"Пол: {gender}")
+    await call.message.answer(text, parse_mode="HTML")
+    await call.message.answer("Всё верно?", reply_markup=kb)
     await state.set_state(Reg.confirm)
-
-
-@dp.message(Reg.phone)
-async def wrong_phone(message: Message):
-    await message.answer("Нажмите кнопку «Поделиться контактом» 👇")
 
 
 @dp.callback_query(F.data == "confirm_yes", Reg.confirm)
@@ -630,8 +635,16 @@ async def confirm_restart(call: CallbackQuery, state: FSMContext):
     if call.from_user.username:
         username_index.pop(call.from_user.username.lower(), None)
     await state.clear()
-    await call.message.edit_text("🔄 Начинаем заново.\n\n📧 Введите Email:")
-    await state.set_state(Reg.email)
+    kb = ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="📱 Поделиться контактом", request_contact=True)]],
+        resize_keyboard=True, one_time_keyboard=True,
+    )
+    await call.message.edit_text("🔄 Начинаем заново.")
+    await call.message.answer(
+        "📱 Нажмите «Поделиться контактом»:",
+        reply_markup=kb,
+    )
+    await state.set_state(Reg.phone)
 
 
 # ================== МЕРОПРИЯТИЯ ==================
@@ -707,6 +720,7 @@ async def event_selected(call: CallbackQuery, state: FSMContext):
         await call.message.answer(caption, reply_markup=kb, parse_mode="HTML")
 
     await state.set_state(Reg.ticket_type)
+
 
 # ================== ОПЛАТА ==================
 async def go_to_payment(message: Message, state: FSMContext):

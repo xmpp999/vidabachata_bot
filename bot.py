@@ -485,6 +485,10 @@ async def start_registration(call: CallbackQuery, state: FSMContext):
         )
         return
 
+
+    print(f"[REG START] user={call.from_user.id} — запускаем регистрацию с телефона")
+
+    
     kb = ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="📱 Поделиться контактом", request_contact=True)]],
         resize_keyboard=True, one_time_keyboard=True,

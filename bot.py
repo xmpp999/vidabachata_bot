@@ -29,6 +29,10 @@ from aiogram.types import (
 )
 from dotenv import load_dotenv
 from supabase import create_client, Client
+import threading
+import http.server
+import socketserver
+import urllib.request
 
 # ================== КОНФИГ ==================
 load_dotenv()

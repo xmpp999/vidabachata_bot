@@ -5,10 +5,14 @@ Telegram-бот для продажи билетов на вечеринки Vid
 
 import asyncio
 import csv
+import http.server
 import io
 import os
 import random
 import re
+import socketserver
+import threading
+import urllib.request
 import uuid
 from datetime import datetime, timedelta
 from email.message import EmailMessage
@@ -29,10 +33,6 @@ from aiogram.types import (
 )
 from dotenv import load_dotenv
 from supabase import create_client, Client
-import threading
-import http.server
-import socketserver
-import urllib.request
 
 # ================== КОНФИГ ==================
 load_dotenv()
@@ -62,7 +62,7 @@ dp = Dispatcher()
 # ================== SUPABASE ==================
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
-# ================== ХРАНИЛИЩЕ (в памяти, синхронизируется с Supabase) ==================
+# ================== ХРАНИЛИЩЕ ==================
 users = {}
 codes = {}
 username_index = {}
@@ -489,10 +489,8 @@ async def start_registration(call: CallbackQuery, state: FSMContext):
         )
         return
 
-
     print(f"[REG START] user={call.from_user.id} — запускаем регистрацию с телефона")
 
-    
     kb = ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="📱 Поделиться контактом", request_contact=True)]],
         resize_keyboard=True, one_time_keyboard=True,
@@ -728,7 +726,6 @@ async def event_selected(call: CallbackQuery, state: FSMContext):
         await call.message.answer(caption, reply_markup=kb, parse_mode="HTML")
 
     await state.set_state(Reg.ticket_type)
-
 
 # ================== ОПЛАТА ==================
 async def go_to_payment(message: Message, state: FSMContext):
@@ -1389,13 +1386,11 @@ async def admin_use_ticket(call: CallbackQuery):
         parse_mode="HTML",
     )
 
-# === КОСТЫЛЬ ДЛЯ RENDER FREE TIER ===
-# 1. HTTP-сервер на порту, чтобы Render видел "открытый порт"
-# 2. Самопинг для предотвращения засыпания
 
+# ================== КОСТЫЛЬ ДЛЯ RENDER FREE TIER ==================
 def start_keepalive_server():
-    """Запускает HTTP-сервер на порту 10000 в фоновом потоке."""
-    PORT = 10000
+    """Запускает HTTP-сервер на порту в фоновом потоке."""
+    PORT = int(os.getenv("PORT", "10000"))
 
     class Handler(http.server.SimpleHTTPRequestHandler):
         def do_GET(self):
@@ -1405,53 +1400,50 @@ def start_keepalive_server():
             self.wfile.write(b"OK")
 
         def log_message(self, format, *args):
-            pass  # отключаем логи, чтобы не засорять
+            pass
 
-    with socketserver.TCPServer(("", PORT), Handler) as httpd:
+    class ReusableTCPServer(socketserver.ThreadingTCPServer):
+        allow_reuse_address = True
+
+    with ReusableTCPServer(("", PORT), Handler) as httpd:
         print(f"[KEEPALIVE] HTTP-сервер запущен на порту {PORT}")
         httpd.serve_forever()
 
 
-def start_self_ping():
-    """Пингует собственный URL каждые 10 минут, чтобы Render не засыпал."""
+async def _self_ping_loop():
+    """Пингует свой URL каждые 10 минут."""
     render_url = os.getenv("RENDER_EXTERNAL_URL", "")
     if not render_url:
         print("[KEEPALIVE] RENDER_EXTERNAL_URL не задан — самопинг отключён")
         return
 
-    async def ping_loop():
-        while True:
-            await asyncio.sleep(600)  # 10 минут
-            try:
-                # Пингуем синхронно в отдельном потоке, чтобы не блокировать
-                await asyncio.to_thread(urllib.request.urlopen, render_url, timeout=10)
-                print(f"[KEEPALIVE] Самопинг успешен: {render_url}")
-            except Exception as e:
-                print(f"[KEEPALIVE] Самопинг ошибка: {e}")
-
-    asyncio.create_task(ping_loop())
     print(f"[KEEPALIVE] Самопинг активирован для {render_url}")
+    while True:
+        await asyncio.sleep(600)  # 10 минут
+        try:
+            await asyncio.to_thread(urllib.request.urlopen, render_url, timeout=10)
+            print("[KEEPALIVE] Самопинг успешен")
+        except Exception as e:
+            print(f"[KEEPALIVE] Самопинг ошибка: {e}")
 
 
 def start_keepalive():
-    """Запускает и HTTP-сервер, и самопинг."""
-    # HTTP-сервер в отдельном потоке
+    """Запускает HTTP-сервер в фоновом потоке."""
     server_thread = threading.Thread(target=start_keepalive_server, daemon=True)
     server_thread.start()
 
-    # Самопинг (нужно вызвать внутри async-цикла)
-    # См. main() ниже
-# === КОНЕЦ КОСТЫЛЯ ===
+
+def start_self_ping():
+    """Запускает самопинг в фоне (async)."""
+    asyncio.create_task(_self_ping_loop())
+
 
 # ================== ЗАПУСК ==================
 async def main():
     load_data()
     print("🚀 Бот запускается...")
 
-    # Запускаем HTTP-сервер для Render (для открытого порта)
     start_keepalive()
-
-    # Запускаем самопинг (внутри async-цикла)
     start_self_ping()
 
     me = await bot.get_me()

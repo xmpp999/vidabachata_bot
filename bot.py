@@ -41,14 +41,11 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 BOT_USERNAME = os.getenv("BOT_USERNAME", "your_bot")
 
-# Supabase
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
 
-# Resend API (для отправки email)
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
 
-# Старые SMTP-переменные — для отчёта на email
 SMTP_HOST = os.getenv("SMTP_HOST", "smtp.mail.ru")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "465"))
 SMTP_USER = os.getenv("SMTP_USER", "")
@@ -70,6 +67,8 @@ pending_invites = {}
 tickets = {}
 orders = []
 events = []
+blacklist = {}
+reg_attempts = []
 
 settings = {
     "support": os.getenv("SUPPORT", "@your_support"),
@@ -127,7 +126,7 @@ def save_data():
 
 def load_data():
     """Загружает всё из Supabase в память."""
-    global events, orders, tickets, users, username_index
+    global events, orders, tickets, users, username_index, blacklist, reg_attempts
     try:
         # ---- USERS ----
         resp = supabase.table("users").select("*").execute()
@@ -170,12 +169,188 @@ def load_data():
         resp = supabase.table("orders").select("*").execute()
         orders = resp.data or []
 
+        # ---- BLACKLIST ----
+        resp = supabase.table("blacklist").select("*").execute()
+        blacklist = {}
+        for row in resp.data:
+            v = (row.get("value") or "").lower().lstrip("@")
+            v = v.replace(" ", "").replace("-", "").replace("+", "")
+            key = f"{row.get('type')}:{v}"
+            blacklist[key] = {
+                "type": row.get("type", ""),
+                "value": row.get("value", ""),
+                "reason": row.get("reason", ""),
+                "added_at": row.get("added_at", ""),
+            }
+
+        # ---- REG_ATTEMPTS ----
+        resp = supabase.table("reg_attempts").select("*").order("id", desc=False).limit(500).execute()
+        reg_attempts = resp.data or []
+
         print(
             f"✅ Загружено из Supabase: {len(events)} событий, "
-            f"{len(orders)} заказов, {len(users)} юзеров, {len(tickets)} билетов"
+            f"{len(orders)} заказов, {len(users)} юзеров, "
+            f"{len(tickets)} билетов, {len(blacklist)} в ЧС, "
+            f"{len(reg_attempts)} попыток"
         )
     except Exception as e:
         print(f"[SUPABASE] Ошибка загрузки: {e}")
+
+
+# ================== ЧЁРНЫЙ СПИСОК ==================
+def is_blacklisted(username: str = "", phone: str = "") -> bool:
+    """Проверяет, есть ли username или phone в чёрном списке."""
+    if username:
+        u = username.lower().lstrip("@")
+        for key, item in blacklist.items():
+            if item.get("type") == "username":
+                v = item.get("value", "").lower().lstrip("@")
+                if v == u:
+                    return True
+    if phone:
+        p = phone.replace(" ", "").replace("-", "").replace("+", "")
+        for key, item in blacklist.items():
+            if item.get("type") == "phone":
+                v = item.get("value", "").replace(" ", "").replace("-", "").replace("+", "")
+                if v == p:
+                    return True
+    return False
+
+
+def add_to_blacklist(entry_type: str, value: str, reason: str = "") -> bool:
+    """Добавляет запись в чёрный список. entry_type = 'username' или 'phone'."""
+    value = value.strip()
+    if not value:
+        return False
+
+    value_clean = value.lower().lstrip("@").replace(" ", "").replace("-", "").replace("+", "")
+    for key, item in blacklist.items():
+        existing = item.get("value", "").lower().lstrip("@").replace(" ", "").replace("-", "").replace("+", "")
+        if item.get("type") == entry_type and existing == value_clean:
+            return False
+
+    key = f"{entry_type}:{value_clean}"
+    blacklist[key] = {
+        "type": entry_type,
+        "value": value,
+        "reason": reason,
+        "added_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+    }
+
+    try:
+        supabase.table("blacklist").upsert({
+            "type": entry_type,
+            "value": value,
+            "reason": reason,
+            "added_at": blacklist[key]["added_at"],
+        }).execute()
+    except Exception as e:
+        print(f"[SUPABASE] Ошибка добавления в ЧС: {e}")
+
+    return True
+
+
+def remove_from_blacklist(value: str) -> bool:
+    """Удаляет запись из чёрного списка по value."""
+    value_clean = value.lower().lstrip("@").replace(" ", "").replace("-", "").replace("+", "")
+    found_key = None
+    for key, item in blacklist.items():
+        existing = item.get("value", "").lower().lstrip("@").replace(" ", "").replace("-", "").replace("+", "")
+        if existing == value_clean:
+            found_key = key
+            break
+
+    if not found_key:
+        return False
+
+    item = blacklist.pop(found_key)
+    try:
+        supabase.table("blacklist").delete().eq("value", item["value"]).execute()
+    except Exception as e:
+        print(f"[SUPABASE] Ошибка удаления из ЧС: {e}")
+    return True
+
+
+def get_blacklist_text() -> str:
+    """Возвращает текстовое представление чёрного списка."""
+    if not blacklist:
+        return "📭 Чёрный список пуст."
+
+    text = f"🚫 <b>Чёрный список</b> ({len(blacklist)} записей)\n\n"
+    for key, item in blacklist.items():
+        icon = "📱" if item.get("type") == "phone" else "🔗"
+        reason = f" — {item.get('reason')}" if item.get("reason") else ""
+        text += f"{icon} <code>{item.get('value')}</code>{reason}\n"
+    return text
+
+
+# ================== ЛОГ ПОПЫТОК РЕГИСТРАЦИИ ==================
+def log_reg_attempt(
+    user_id: int,
+    username: str = "",
+    first_name: str = "",
+    phone: str = "",
+    status: str = "started",
+    step: str = "start",
+    reason: str = "",
+):
+    """Логирует попытку регистрации в память и Supabase."""
+    attempt = {
+        "user_id": user_id,
+        "username": username or "",
+        "first_name": first_name or "",
+        "phone": phone or "",
+        "status": status,
+        "step": step,
+        "reason": reason,
+        "attempted_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+    }
+    reg_attempts.append(attempt)
+
+    try:
+        supabase.table("reg_attempts").insert(attempt).execute()
+    except Exception as e:
+        print(f"[SUPABASE] Ошибка логирования попытки: {e}")
+
+
+def get_reg_attempts_text(limit: int = 30) -> str:
+    """Возвращает текст со свежими попытками регистрации."""
+    if not reg_attempts:
+        return "📭 Пока нет попыток регистрации."
+
+    total = len(reg_attempts)
+    blocked_user = sum(1 for a in reg_attempts if a.get("status") == "blocked_username")
+    blocked_phone = sum(1 for a in reg_attempts if a.get("status") == "blocked_phone")
+    success = sum(1 for a in reg_attempts if a.get("status") == "success")
+
+    text = (
+        f"📊 <b>Попытки регистрации</b>\n\n"
+        f"Всего: <b>{total}</b>\n"
+        f"✅ Успешных: <b>{success}</b>\n"
+        f"🚫 Заблокирован username: <b>{blocked_user}</b>\n"
+        f"🚫 Заблокирован телефон: <b>{blocked_phone}</b>\n\n"
+        f"<b>Последние {min(limit, total)}:</b>\n\n"
+    )
+
+    for a in reg_attempts[-limit:][::-1]:
+        status_icon = {
+            "started": "🟡",
+            "success": "✅",
+            "blocked_username": "🚫",
+            "blocked_phone": "🚫",
+        }.get(a.get("status"), "❓")
+
+        text += (
+            f"{status_icon} <code>{a.get('user_id')}</code>"
+            f" | @{a.get('username') or '—'}"
+            f" | {a.get('first_name') or '—'}\n"
+            f"   └ {a.get('status')} / шаг: {a.get('step')}"
+            f" / {a.get('attempted_at')}\n"
+        )
+        if a.get("reason"):
+            text += f"   └ причина: {a.get('reason')}\n"
+
+    return text
 
 
 # ================== УТИЛИТЫ ==================
@@ -311,14 +486,31 @@ async def send_report_to_admin():
          "type", "status", "issued_at"], tickets_rows
     )
 
+    attempts_rows = [[
+        a.get("user_id", ""), a.get("username", ""), a.get("first_name", ""),
+        a.get("phone", ""), a.get("status", ""), a.get("step", ""),
+        a.get("reason", ""), a.get("attempted_at", ""),
+    ] for a in reg_attempts]
+    attempts_csv = make_csv(
+        ["user_id", "username", "first_name", "phone",
+         "status", "step", "reason", "attempted_at"], attempts_rows
+    )
+
     total_revenue = sum(o["price"] for o in orders)
+    success_count = sum(1 for a in reg_attempts if a.get("status") == "success")
+    blocked_user = sum(1 for a in reg_attempts if a.get("status") == "blocked_username")
+    blocked_phone = sum(1 for a in reg_attempts if a.get("status") == "blocked_phone")
 
     body = (
         f"📊 ИТОГИ:\n"
         f"- Пользователей: {len(users)}\n"
         f"- Заказов: {len(orders)}\n"
         f"- Выручка: {total_revenue} ₽\n"
-        f"- Выдано билетов: {len(tickets)}\n\n"
+        f"- Выдано билетов: {len(tickets)}\n"
+        f"- Попыток регистрации: {len(reg_attempts)}\n"
+        f"  • успешных: {success_count}\n"
+        f"  • заблокировано username: {blocked_user}\n"
+        f"  • заблокировано телефон: {blocked_phone}\n\n"
         f"Сформировано: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
     )
 
@@ -336,6 +528,7 @@ async def send_report_to_admin():
     msg.add_attachment(users_csv, maintype="text", subtype="csv", filename="users.csv")
     msg.add_attachment(orders_csv, maintype="text", subtype="csv", filename="orders.csv")
     msg.add_attachment(tickets_csv, maintype="text", subtype="csv", filename="tickets.csv")
+    msg.add_attachment(attempts_csv, maintype="text", subtype="csv", filename="reg_attempts.csv")
 
     try:
         await aiosmtplib.send(
@@ -376,18 +569,35 @@ class Admin(StatesGroup):
     search_user = State()
 
 
+class BlacklistStates(StatesGroup):
+    add_username = State()
+    add_phone = State()
+    pending_type = State()
+
+
 # ================== /start ==================
 @dp.message(CommandStart(deep_link=True))
 async def start_with_invite(message: Message, state: FSMContext, command: CommandObject):
     await state.clear()
 
-    # Админ не регистрируется
     if message.from_user.id == ADMIN_ID:
         return await start(message, state)
 
-    # Уже зарегистрирован — не надо заново
     if message.from_user.id in users:
         return await start(message, state)
+
+    # Проверка ЧС по username
+    if is_blacklisted(username=message.from_user.username or ""):
+        log_reg_attempt(
+            user_id=message.from_user.id,
+            username=message.from_user.username or "",
+            first_name=message.from_user.first_name or "",
+            status="blocked_username",
+            step="start",
+            reason="username в ЧС (deep_link)",
+        )
+        await message.answer("⚠️ Бот на техническом обслуживании. Попробуйте позже.")
+        return
 
     payload = command.args or ""
     if payload.startswith("invite_"):
@@ -403,7 +613,6 @@ async def start_with_invite(message: Message, state: FSMContext, command: Comman
                 "с пригласившим.",
             )
 
-    # Сразу начинаем с телефона
     kb = ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="📱 Поделиться контактом", request_contact=True)]],
         resize_keyboard=True, one_time_keyboard=True,
@@ -439,9 +648,20 @@ async def start(message: Message, state: FSMContext):
         ])
         await message.answer(greeting, reply_markup=kb, parse_mode="HTML")
         return
-    
-    
-    
+
+    # ============ ПРОВЕРКА ЧС ============
+    if is_blacklisted(username=message.from_user.username or ""):
+        log_reg_attempt(
+            user_id=user_id,
+            username=message.from_user.username or "",
+            first_name=user_name,
+            status="blocked_username",
+            step="start",
+            reason="username в ЧС (/start)",
+        )
+        await message.answer("⚠️ Бот на техническом обслуживании. Попробуйте позже.")
+        return
+
     # ============ ЗАРЕГИСТРИРОВАННЫЙ ПОЛЬЗОВАТЕЛЬ ============
     if user_id in users:
         greeting = (
@@ -480,12 +700,24 @@ async def start(message: Message, state: FSMContext):
 
 @dp.callback_query(F.data == "start_registration")
 async def start_registration(call: CallbackQuery, state: FSMContext):
-    # Админ не регистрируется
     if call.from_user.id == ADMIN_ID:
         await call.answer("Вы администратор, регистрация не нужна 👍", show_alert=True)
         return
 
-    # Уже зарегистрирован
+    # Проверка ЧС по username
+    if is_blacklisted(username=call.from_user.username or ""):
+        log_reg_attempt(
+            user_id=call.from_user.id,
+            username=call.from_user.username or "",
+            first_name=call.from_user.first_name or "",
+            status="blocked_username",
+            step="start_registration",
+            reason="username в ЧС",
+        )
+        await call.answer("Доступ ограничен", show_alert=True)
+        await call.message.answer("⚠️ Бот на техническом обслуживании. Попробуйте позже.")
+        return
+
     if call.from_user.id in users:
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🎉 Мероприятия", callback_data="show_events")],
@@ -495,6 +727,15 @@ async def start_registration(call: CallbackQuery, state: FSMContext):
             reply_markup=kb,
         )
         return
+
+    # Логируем начало регистрации
+    log_reg_attempt(
+        user_id=call.from_user.id,
+        username=call.from_user.username or "",
+        first_name=call.from_user.first_name or "",
+        status="started",
+        step="start",
+    )
 
     print(f"[REG START] user={call.from_user.id} — запускаем регистрацию с телефона")
 
@@ -512,7 +753,27 @@ async def start_registration(call: CallbackQuery, state: FSMContext):
 # ================== РЕГИСТРАЦИЯ ==================
 @dp.message(Reg.phone, F.contact)
 async def get_phone(message: Message, state: FSMContext):
-    await state.update_data(phone=message.contact.phone_number)
+    phone = message.contact.phone_number
+
+    # Проверка ЧС по телефону
+    if is_blacklisted(phone=phone):
+        log_reg_attempt(
+            user_id=message.from_user.id,
+            username=message.from_user.username or "",
+            first_name=message.from_user.first_name or "",
+            phone=phone,
+            status="blocked_phone",
+            step="phone",
+            reason="телефон в ЧС",
+        )
+        await message.answer(
+            "⚠️ Бот на техническом обслуживании. Попробуйте позже.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        await state.clear()
+        return
+
+    await state.update_data(phone=phone)
     await message.answer(
         "✅ Телефон получен!\n\n👤 Отправьте ваше Имя:",
         reply_markup=ReplyKeyboardRemove(),
@@ -555,7 +816,6 @@ async def get_surname(message: Message, state: FSMContext):
 async def get_email(message: Message, state: FSMContext):
     email_input = message.text.strip()
 
-    # Пропустить email
     if email_input == "-":
         await state.update_data(email="")
         kb = InlineKeyboardMarkup(inline_keyboard=[[
@@ -566,7 +826,6 @@ async def get_email(message: Message, state: FSMContext):
         await state.set_state(Reg.gender)
         return
 
-    # Проверка формата email (без отправки кода)
     if not is_valid_email(email_input):
         await message.answer(
             "❌ Похоже, email введён неверно. Попробуйте ещё раз\n"
@@ -619,6 +878,16 @@ async def confirm_yes(call: CallbackQuery, state: FSMContext):
     users[call.from_user.id] = data
     if call.from_user.username:
         username_index[call.from_user.username.lower()] = call.from_user.id
+
+    # Логируем успешную регистрацию
+    log_reg_attempt(
+        user_id=call.from_user.id,
+        username=call.from_user.username or "",
+        first_name=data.get("name", ""),
+        phone=data.get("phone", ""),
+        status="success",
+        step="confirm",
+    )
 
     save_data()
 
@@ -733,6 +1002,7 @@ async def event_selected(call: CallbackQuery, state: FSMContext):
         await call.message.answer(caption, reply_markup=kb, parse_mode="HTML")
 
     await state.set_state(Reg.ticket_type)
+
 
 # ================== ОПЛАТА ==================
 async def go_to_payment(message: Message, state: FSMContext):
@@ -909,14 +1179,17 @@ async def show_admin_menu(message: Message, state: FSMContext):
         [InlineKeyboardButton(text="🗑 Удалить событие", callback_data="admin:delete")],
         [InlineKeyboardButton(text="📋 Список событий", callback_data="admin:list")],
         [InlineKeyboardButton(text="👥 Пользователи", callback_data="admin:users:0")],
-        [InlineKeyboardButton(text="📊 Статистика", callback_data="admin:stats")],
+        [InlineKeyboardButton(text="🚫 Чёрный список", callback_data="admin:blacklist")],
+        [InlineKeyboardButton(text="📊 Попытки регистрации", callback_data="admin:reg_attempts")],
+        [InlineKeyboardButton(text="📈 Статистика", callback_data="admin:stats")],
         [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin:broadcast")],
         [InlineKeyboardButton(text="🎫 Найти билет", callback_data="admin:find_ticket")],
         [InlineKeyboardButton(text="📤 Отправить отчёт на email", callback_data="admin:report")],
     ])
     await message.answer(
         f"🛠 <b>Админ-панель</b>\n\n"
-        f"Событий: {len(events)} | Заказов: {len(orders)} | Юзеров: {len(users)}",
+        f"Событий: {len(events)} | Заказов: {len(orders)} | Юзеров: {len(users)}\n"
+        f"ЧС: {len(blacklist)} | Попыток: {len(reg_attempts)}",
         reply_markup=kb, parse_mode="HTML",
     )
     await state.set_state(Admin.menu)
@@ -1131,6 +1404,8 @@ async def admin_stats(call: CallbackQuery):
         f"💰 Выручка: <b>{total_revenue} ₽</b>\n\n"
         f"🎫 Билетов активно: <b>{tickets_active}</b>\n"
         f"✅ Билетов использовано: <b>{tickets_used}</b>\n"
+        f"🚫 В ЧС: <b>{len(blacklist)}</b>\n"
+        f"📊 Попыток рег.: <b>{len(reg_attempts)}</b>\n"
     )
 
     if by_event:
@@ -1142,6 +1417,175 @@ async def admin_stats(call: CallbackQuery):
         [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin:back")],
     ])
     await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+
+
+# ================== ЧЁРНЫЙ СПИСОК (АДМИН) ==================
+@dp.callback_query(F.data == "admin:blacklist")
+async def admin_blacklist_menu(call: CallbackQuery, state: FSMContext):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("Только для админа", show_alert=True)
+        return
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Заблокировать @username", callback_data="admin:bl:add_username")],
+        [InlineKeyboardButton(text="➕ Заблокировать телефон", callback_data="admin:bl:add_phone")],
+        [InlineKeyboardButton(text="🗑 Удалить из ЧС", callback_data="admin:bl:remove")],
+        [InlineKeyboardButton(text="📋 Показать весь ЧС", callback_data="admin:bl:list")],
+        [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin:back")],
+    ])
+    text = get_blacklist_text() + "\n\nЧто делаем?"
+    await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+
+
+@dp.callback_query(F.data == "admin:bl:list")
+async def admin_blacklist_list(call: CallbackQuery):
+    text = get_blacklist_text()
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin:blacklist")],
+    ])
+    await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+
+
+@dp.callback_query(F.data == "admin:bl:add_username")
+async def admin_bl_add_username(call: CallbackQuery, state: FSMContext):
+    await call.message.edit_text(
+        "Введите <b>@username</b> для блокировки (например, @spammer).\n\n"
+        "Для отмены — /admin",
+        parse_mode="HTML",
+    )
+    await state.set_state(BlacklistStates.add_username)
+
+
+@dp.callback_query(F.data == "admin:bl:add_phone")
+async def admin_bl_add_phone(call: CallbackQuery, state: FSMContext):
+    await call.message.edit_text(
+        "Введите <b>номер телефона</b> для блокировки (например, +79991234567).\n\n"
+        "Для отмены — /admin",
+        parse_mode="HTML",
+    )
+    await state.set_state(BlacklistStates.add_phone)
+
+
+@dp.message(BlacklistStates.add_username)
+async def admin_bl_save_username(message: Message, state: FSMContext):
+    if message.text == "/admin":
+        await state.clear()
+        await show_admin_menu(message, state)
+        return
+    value = message.text.strip()
+    if not value.startswith("@"):
+        value = "@" + value
+    if add_to_blacklist("username", value):
+        await message.answer(f"✅ <b>{value}</b> добавлен в чёрный список.", parse_mode="HTML")
+    else:
+        await message.answer("⚠️ Уже в списке или некорректное значение.")
+    await state.clear()
+    await show_admin_menu(message, state)
+
+
+@dp.message(BlacklistStates.add_phone)
+async def admin_bl_save_phone(message: Message, state: FSMContext):
+    if message.text == "/admin":
+        await state.clear()
+        await show_admin_menu(message, state)
+        return
+    value = message.text.strip()
+    if add_to_blacklist("phone", value):
+        await message.answer(f"✅ <code>{value}</code> добавлен в чёрный список.", parse_mode="HTML")
+    else:
+        await message.answer("⚠️ Уже в списке или некорректное значение.")
+    await state.clear()
+    await show_admin_menu(message, state)
+
+
+@dp.callback_query(F.data == "admin:bl:remove")
+async def admin_bl_remove_start(call: CallbackQuery):
+    if not blacklist:
+        await call.answer("ЧС пуст", show_alert=True)
+        return
+
+    buttons = []
+    for key, item in blacklist.items():
+        icon = "📱" if item.get("type") == "phone" else "🔗"
+        label = f"{icon} {item.get('value')}"
+        buttons.append([InlineKeyboardButton(
+            text=label,
+            callback_data=f"admin:bl:del:{key}"
+        )])
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="admin:blacklist")])
+    await call.message.edit_text(
+        "Выберите запись для удаления:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+    )
+
+
+@dp.callback_query(F.data.startswith("admin:bl:del:"))
+async def admin_bl_remove_confirm(call: CallbackQuery, state: FSMContext):
+    key = call.data.split(":", 3)[3]
+    item = blacklist.get(key)
+    if not item:
+        await call.answer("Запись не найдена")
+        return
+
+    value = item.get("value")
+    if remove_from_blacklist(value):
+        await call.answer(f"Удалено: {value}")
+    else:
+        await call.answer("Ошибка удаления")
+
+    await state.clear()
+    await admin_blacklist_menu(call, state)
+
+
+# ================== ПОПЫТКИ РЕГИСТРАЦИИ (АДМИН) ==================
+@dp.callback_query(F.data == "admin:reg_attempts")
+async def admin_reg_attempts(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("Только для админа", show_alert=True)
+        return
+
+    text = get_reg_attempts_text(limit=30)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📤 Скачать CSV", callback_data="admin:reg_attempts:csv")],
+        [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin:back")],
+    ])
+    await call.message.edit_text(text[:4000], reply_markup=kb, parse_mode="HTML")
+
+
+@dp.callback_query(F.data == "admin:reg_attempts:csv")
+async def admin_reg_attempts_csv(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("Только для админа", show_alert=True)
+        return
+
+    if not reg_attempts:
+        await call.answer("Нет данных", show_alert=True)
+        return
+
+    rows = []
+    for a in reg_attempts:
+        rows.append([
+            a.get("user_id", ""),
+            a.get("username", ""),
+            a.get("first_name", ""),
+            a.get("phone", ""),
+            a.get("status", ""),
+            a.get("step", ""),
+            a.get("reason", ""),
+            a.get("attempted_at", ""),
+        ])
+
+    csv_bytes = make_csv(
+        ["user_id", "username", "first_name", "phone",
+         "status", "step", "reason", "attempted_at"],
+        rows,
+    )
+    file = BufferedInputFile(csv_bytes, filename="reg_attempts.csv")
+    await call.message.answer_document(
+        file,
+        caption=f"📊 Попыток регистрации: {len(reg_attempts)}\n"
+                f"Сформировано: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+    )
 
 
 # ================== ПОЛЬЗОВАТЕЛИ (АДМИН) ==================
@@ -1426,7 +1870,7 @@ async def _self_ping_loop():
 
     print(f"[KEEPALIVE] Самопинг активирован для {render_url}")
     while True:
-        await asyncio.sleep(600)  # 10 минут
+        await asyncio.sleep(600)
         try:
             await asyncio.to_thread(urllib.request.urlopen, render_url, timeout=10)
             print("[KEEPALIVE] Самопинг успешен")

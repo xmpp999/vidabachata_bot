@@ -7,6 +7,7 @@ import asyncio
 import csv
 import http.server
 import io
+import json
 import os
 import random
 import re
@@ -33,6 +34,7 @@ from aiogram.types import (
 )
 from dotenv import load_dotenv
 from supabase import create_client, Client
+from yookassa import Configuration, Payment
 
 # ================== КОНФИГ ==================
 load_dotenv()
@@ -52,6 +54,14 @@ SMTP_USER = os.getenv("SMTP_USER", "")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "")
 
+# ЮKassa
+YOOKASSA_SHOP_ID = os.getenv("YOOKASSA_SHOP_ID", "")
+YOOKASSA_SECRET_KEY = os.getenv("YOOKASSA_SECRET_KEY", "")
+
+# Настраиваем ЮKassa
+Configuration.account_id = YOOKASSA_SHOP_ID
+Configuration.secret_key = YOOKASSA_SECRET_KEY
+
 # ================== БОТ ==================
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
@@ -69,6 +79,7 @@ orders = []
 events = []
 blacklist = {}
 reg_attempts = []
+pending_payments = {}   # {payment_id: {"user_id": ..., "event_id": ..., "ticket_type": ..., "price": ..., "state": "..."}}
 
 settings = {
     "support": os.getenv("SUPPORT", "@your_support"),
@@ -195,6 +206,40 @@ def load_data():
         )
     except Exception as e:
         print(f"[SUPABASE] Ошибка загрузки: {e}")
+
+
+# ================== ЮKASSA ==================
+def create_yookassa_payment(amount: int, description: str, user_id: int, metadata: dict) -> dict:
+    """Создаёт платёж в ЮKassa. Возвращает dict с payment_id и confirmation_url."""
+    idempotence_key = str(uuid.uuid4())
+
+    payment_data = {
+        "amount": {
+            "value": f"{amount}.00",
+            "currency": "RUB"
+        },
+        "capture": True,
+        "confirmation": {
+            "type": "redirect",
+            "return_url": "https://t.me/" + BOT_USERNAME
+        },
+        "description": description,
+        "metadata": {
+            "user_id": user_id,
+            **metadata
+        }
+    }
+
+    try:
+        payment = Payment.create(payment_data, idempotence_key)
+        return {
+            "payment_id": payment.id,
+            "confirmation_url": payment.confirmation.confirmation_url,
+            "status": payment.status
+        }
+    except Exception as e:
+        print(f"[YOOKASSA] Ошибка создания платежа: {e}")
+        return {}
 
 
 # ================== ЧЁРНЫЙ СПИСОК ==================
@@ -978,13 +1023,11 @@ async def event_selected(call: CallbackQuery, state: FSMContext):
     await state.update_data(event_id=eid, event=event)
 
     if is_admin:
-        # Для админа — только просмотр анонса
         buttons = [[InlineKeyboardButton(
             text="🔙 Закрыть",
             callback_data="admin:back"
         )]]
     else:
-        # Для обычного пользователя — покупка
         buttons = [[InlineKeyboardButton(
             text=f"🎫 Обычный — {event['price_single']} ₽",
             callback_data="ticket:single"
@@ -1019,32 +1062,7 @@ async def event_selected(call: CallbackQuery, state: FSMContext):
     await state.set_state(Reg.ticket_type)
 
 
-
-# ================== ОПЛАТА ==================
-async def go_to_payment(message: Message, state: FSMContext):
-    data = await state.get_data()
-    price = data.get("price", 0)
-    ticket_label = "Парный" if data.get("ticket_type") == "pair" else "Обычный"
-    yoomoney = settings.get("yoomoney_link", "")
-    support = settings.get("support", "")
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"💳 Оплатить — {price} ₽", url=yoomoney)],
-        [InlineKeyboardButton(text="✅ Я оплатил", callback_data="paid")],
-        [InlineKeyboardButton(text="🆘 Техподдержка", url=f"https://t.me/{support.lstrip('@')}")],
-        [InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_order")],
-    ])
-    await message.answer(
-        f"💳 <b>Билет: {ticket_label} — {price} ₽</b>\n\n"
-        "1. Нажмите «Оплатить».\n"
-        f"2. В комментарии укажите: <code>{message.chat.id}</code>\n"
-        "3. Нажмите «Я оплатил».\n\n"
-        "⏱ 60 минут на оплату.",
-        reply_markup=kb, parse_mode="HTML",
-    )
-    await state.set_state(Reg.payment)
-
-
+# ================== ОПЛАТА ЧЕРЕЗ ЮKASSA ==================
 @dp.callback_query(F.data == "ticket:single", Reg.ticket_type)
 async def ticket_single(call: CallbackQuery, state: FSMContext):
     data = await state.get_data()
@@ -1099,13 +1117,86 @@ async def partner_input(message: Message, state: FSMContext):
         )
 
 
+async def go_to_payment(message: Message, state: FSMContext):
+    """Создаёт платёж в ЮKassa и отправляет пользователю ссылку."""
+    data = await state.get_data()
+    price = data.get("price", 0)
+    ticket_type = data.get("ticket_type", "single")
+    event = data.get("event", {})
+    user_id = message.chat.id
+
+    ticket_label = "Парный" if ticket_type == "pair" else "Обычный"
+
+    # Формируем описание
+    description = f"{event.get('title', 'Билет')} — {ticket_label} билет"
+
+    # Создаём платёж в ЮKassa
+    payment = create_yookassa_payment(
+        amount=price,
+        description=description,
+        user_id=user_id,
+        metadata={
+            "event_id": data.get("event_id", ""),
+            "ticket_type": ticket_type,
+            "price": str(price),
+        },
+    )
+
+    if not payment:
+        await message.answer(
+            "❌ Ошибка при создании платежа. Попробуйте позже или напишите в поддержку."
+        )
+        return
+
+    payment_id = payment["payment_id"]
+    confirmation_url = payment["confirmation_url"]
+
+    # Сохраняем в ожидающие платежи
+    pending_payments[payment_id] = {
+        "user_id": user_id,
+        "event_id": data.get("event_id", ""),
+        "event_title": event.get("title", ""),
+        "ticket_type": ticket_type,
+        "price": price,
+        "partner_id": data.get("partner_id"),
+        "name": f"{data.get('name', '')} {data.get('surname', '')}".strip(),
+        "phone": data.get("phone", ""),
+        "email": data.get("email", ""),
+    }
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"💳 Оплатить {price} ₽", url=confirmation_url)],
+        [InlineKeyboardButton(text="🆘 Техподдержка", url=f"https://t.me/{settings.get('support', '@your_support').lstrip('@')}")],
+        [InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_order")],
+    ])
+
+    await message.answer(
+        f"💳 <b>Билет: {ticket_label} — {price} ₽</b>\n\n"
+        f"🎉 {event.get('title', '')}\n"
+        f"📅 {event.get('date_text', '')}\n\n"
+        "1. Нажмите «Оплатить» — откроется страница ЮKassa.\n"
+        "2. Оплатите картой, СБП или другим способом.\n"
+        "3. После оплаты билет придёт автоматически в течение 1 минуты.\n\n"
+        "⏱ Страница оплаты активна 60 минут.",
+        reply_markup=kb, parse_mode="HTML",
+    )
+    await state.set_state(Reg.payment)
+
+
+@dp.callback_query(F.data == "cancel_order")
+async def cancel_order(call: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await call.message.edit_text("❌ Отменено. /start — заново.")
+
+
+# ================== ВЫДАЧА БИЛЕТА (после оплаты) ==================
 async def issue_ticket(user_id: int, code: str, ticket_type: str, holder_name: str, event: dict):
     tickets[code] = {
         "user_id": user_id,
         "type": ticket_type,
         "holder": holder_name,
         "used": False,
-        "event_id": event.get("id"),
+        "event_id": event.get("id", ""),
         "event_title": event.get("title", ""),
         "issued_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
     }
@@ -1114,69 +1205,138 @@ async def issue_ticket(user_id: int, code: str, ticket_type: str, holder_name: s
     qr_file = make_qr_image(code)
     type_label = "Парный" if ticket_type == "pair" else "Обычный"
     caption = (
-        f"🎫 <b>Ваш билет на {event['title']}</b>\n\n"
+        f"🎫 <b>Ваш билет на {event.get('title', 'Vida Bachata')}</b>\n\n"
         f"👤 {holder_name}\n"
         f"🎟 {type_label}\n"
-        f"📅 {event['date_text']}\n"
-        f"📍 {event['place']}\n\n"
+        f"📅 {event.get('date_text', '')}\n"
+        f"📍 {event.get('place', '')}\n\n"
         f"Код: <code>{code}</code>\n\n"
         "Покажите QR на входе."
     )
-    await bot.send_photo(user_id, qr_file, caption=caption, parse_mode="HTML")
+    try:
+        await bot.send_photo(user_id, qr_file, caption=caption, parse_mode="HTML")
+    except Exception as e:
+        print(f"[TICKET] Ошибка отправки билета user={user_id}: {e}")
 
 
-@dp.callback_query(F.data == "paid", Reg.payment)
-async def paid(call: CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    buyer_id = call.from_user.id
-    buyer_name = f"{data['name']} {data['surname']}"
-    ticket_type = data.get("ticket_type", "single")
-    event = data.get("event", {})
+async def process_successful_payment(payment_id: str):
+    """Обрабатывает успешную оплату: выдаёт билеты, уведомляет админа и пользователя."""
+    pending = pending_payments.pop(payment_id, None)
+    if not pending:
+        print(f"[YOOKASSA] payment_id={payment_id} не найден в pending")
+        return
 
+    user_id = pending["user_id"]
+    event = next((e for e in events if e["id"] == pending["event_id"]), None)
+    if not event:
+        print(f"[YOOKASSA] Событие {pending['event_id']} не найдено")
+        return
+
+    ticket_type = pending["ticket_type"]
+    buyer_name = pending["name"] or "Клиент"
+
+    # Создаём заказ
     order = {
         "order_id": next_order_id(),
-        "user_id": buyer_id,
-        "event_id": data.get("event_id"),
+        "user_id": user_id,
+        "event_id": pending["event_id"],
         "event_title": event.get("title", ""),
-        "email": data.get("email", ""),
+        "email": pending.get("email", ""),
         "name": buyer_name,
         "ticket_type": ticket_type,
-        "price": data.get("price", 0),
+        "price": pending["price"],
         "paid_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
     }
     orders.append(order)
     save_data()
 
+    # Выдаём билет
+    buyer_code = generate_ticket_code()
+    await issue_ticket(user_id, buyer_code, ticket_type, buyer_name, event)
+
+    # Если парный — выдаём второму
+    if ticket_type == "pair" and pending.get("partner_id"):
+        partner_id = pending["partner_id"]
+        if partner_id in users:
+            partner = users[partner_id]
+            partner_name = f"{partner['name']} {partner['surname']}"
+            await issue_ticket(
+                partner_id, generate_ticket_code(),
+                ticket_type, partner_name, event
+            )
+
+    # Уведомляем админа
     try:
         await bot.send_message(
             ADMIN_ID,
-            f"🔔 <b>Заказ!</b>\n"
-            f"{event.get('title')}\n"
-            f"{buyer_name} | {data.get('phone')}\n"
-            f"{ticket_type} | {data.get('price')} ₽",
+            f"💰 <b>Оплата получена!</b>\n\n"
+            f"💳 Платёж: <code>{payment_id}</code>\n"
+            f"🎉 {event.get('title', '')}\n"
+            f"👤 {buyer_name} | {pending.get('phone', '')}\n"
+            f"🎫 {ticket_type} | {pending['price']} ₽",
             parse_mode="HTML",
         )
     except Exception:
         pass
 
-    buyer_code = generate_ticket_code()
-    await issue_ticket(buyer_id, buyer_code, ticket_type, buyer_name, event)
+    # Уведомляем пользователя
+    try:
+        await bot.send_message(
+            user_id,
+            "✅ <b>Оплата получена!</b>\n\n"
+            "Ваш билет отправлен выше ☝️\n"
+            "Сохраните QR-код — покажите его на входе.",
+            parse_mode="HTML",
+        )
+    except Exception:
+        pass
 
-    if ticket_type == "pair":
-        partner_id = data.get("partner_id")
-        if partner_id and partner_id in users:
-            partner = users[partner_id]
-            partner_name = f"{partner['name']} {partner['surname']}"
-            await issue_ticket(partner_id, generate_ticket_code(), ticket_type, partner_name, event)
 
-    await call.message.edit_text("✅ Спасибо! Билеты отправлены 🎫")
-    await state.clear()
+# ================== ЮKASSA WEBHOOK ==================
+class YooKassaWebhookHandler(http.server.BaseHTTPRequestHandler):
+    """Обработчик webhook от ЮKassa."""
+
+    def do_POST(self):
+        if self.path != "/yookassa/webhook":
+            self.send_response(404)
+            self.end_headers()
+            return
+
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_length).decode("utf-8")
+            data = json.loads(body)
+
+            event = data.get("event", "")
+            obj = data.get("object", {})
+            payment_id = obj.get("id", "")
+            status = obj.get("status", "")
+
+            print(f"[YOOKASSA WEBHOOK] event={event}, payment_id={payment_id}, status={status}")
+
+            # Обрабатываем успешную оплату
+            if event == "payment.succeeded" and status == "succeeded":
+                # Запускаем обработку в основном event loop
+                asyncio.run_coroutine_threadsafe(
+                    process_successful_payment(payment_id),
+                    _main_loop
+                )
+
+            self.send_response(200)
+            self.send_header("Content-type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"OK")
+
+        except Exception as e:
+            print(f"[YOOKASSA WEBHOOK] Ошибка: {e}")
+            self.send_response(500)
+            self.end_headers()
+
+    def log_message(self, format, *args):
+        pass
 
 
-@dp.callback_query(F.data == "cancel_order")
-async def cancel_order(call: CallbackQuery, state: FSMContext):
-    await state.clear()
-    await call.message.edit_text("❌ Отменено. /start — заново.")
+_main_loop = None  # установим в main()
 
 
 # ================== АДМИН ==================
@@ -1357,567 +1517,3 @@ async def finish_add_event(message: Message, state: FSMContext):
     await message.answer(f"✅ Событие «{data['title']}» добавлено!")
 
 
-@dp.callback_query(F.data == "admin:list")
-async def admin_list(call: CallbackQuery):
-    if not events:
-        await call.message.edit_text("📭 Нет событий.")
-        return
-    text = "📋 <b>События:</b>\n\n"
-    for e in events:
-        status = "🟢" if e.get("active") else "🔴"
-        text += f"{status} <b>{e['title']}</b>\n   📅 {e['date_text']}\n   🆔 <code>{e['id']}</code>\n\n"
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin:back")],
-    ])
-    await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
-
-
-@dp.callback_query(F.data == "admin:delete")
-async def admin_delete(call: CallbackQuery, state: FSMContext):
-    if not events:
-        await call.message.edit_text("📭 Нет событий.")
-        return
-    buttons = []
-    for e in events:
-        buttons.append([InlineKeyboardButton(
-            text=f"🗑 {e['title']} — {e['date_text']}",
-            callback_data=f"admin:del:{e['id']}"
-        )])
-    buttons.append([InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin:back")])
-    await call.message.edit_text(
-        "🗑 Выберите событие для удаления:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
-    )
-
-
-@dp.callback_query(F.data.startswith("admin:del:"))
-async def admin_delete_confirm(call: CallbackQuery, state: FSMContext):
-    eid = call.data.split(":")[2]
-    events[:] = [e for e in events if e["id"] != eid]
-    supabase.table("events").delete().eq("id", eid).execute()
-    await call.message.edit_text("✅ Удалено.")
-    await show_admin_menu(call.message, state)
-
-
-@dp.callback_query(F.data == "admin:stats")
-async def admin_stats(call: CallbackQuery):
-    total_revenue = sum(o["price"] for o in orders)
-    paid_orders = len(orders)
-    tickets_active = sum(1 for t in tickets.values() if not t.get("used"))
-    tickets_used = sum(1 for t in tickets.values() if t.get("used"))
-
-    by_event = {}
-    for o in orders:
-        title = o.get("event_title", "—")
-        by_event.setdefault(title, {"count": 0, "sum": 0})
-        by_event[title]["count"] += 1
-        by_event[title]["sum"] += o["price"]
-
-    text = (
-        f"📊 <b>Статистика</b>\n\n"
-        f"👥 Пользователей: <b>{len(users)}</b>\n"
-        f"🎉 Событий: <b>{len(events)}</b>\n"
-        f"🛒 Заказов: <b>{paid_orders}</b>\n"
-        f"💰 Выручка: <b>{total_revenue} ₽</b>\n\n"
-        f"🎫 Билетов активно: <b>{tickets_active}</b>\n"
-        f"✅ Билетов использовано: <b>{tickets_used}</b>\n"
-        f"🚫 В ЧС: <b>{len(blacklist)}</b>\n"
-        f"📊 Попыток рег.: <b>{len(reg_attempts)}</b>\n"
-    )
-
-    if by_event:
-        text += "\n<b>Продажи по событиям:</b>\n"
-        for title, info in by_event.items():
-            text += f"• {title}: {info['count']} шт, {info['sum']} ₽\n"
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin:back")],
-    ])
-    await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
-
-
-# ================== ЧЁРНЫЙ СПИСОК (АДМИН) ==================
-@dp.callback_query(F.data == "admin:blacklist")
-async def admin_blacklist_menu(call: CallbackQuery, state: FSMContext):
-    if call.from_user.id != ADMIN_ID:
-        await call.answer("Только для админа", show_alert=True)
-        return
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Заблокировать @username", callback_data="admin:bl:add_username")],
-        [InlineKeyboardButton(text="➕ Заблокировать телефон", callback_data="admin:bl:add_phone")],
-        [InlineKeyboardButton(text="🗑 Удалить из ЧС", callback_data="admin:bl:remove")],
-        [InlineKeyboardButton(text="📋 Показать весь ЧС", callback_data="admin:bl:list")],
-        [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin:back")],
-    ])
-    text = get_blacklist_text() + "\n\nЧто делаем?"
-    await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
-
-
-@dp.callback_query(F.data == "admin:bl:list")
-async def admin_blacklist_list(call: CallbackQuery):
-    text = get_blacklist_text()
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin:blacklist")],
-    ])
-    await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
-
-
-@dp.callback_query(F.data == "admin:bl:add_username")
-async def admin_bl_add_username(call: CallbackQuery, state: FSMContext):
-    await call.message.edit_text(
-        "Введите <b>@username</b> для блокировки (например, @spammer).\n\n"
-        "Для отмены — /admin",
-        parse_mode="HTML",
-    )
-    await state.set_state(BlacklistStates.add_username)
-
-
-@dp.callback_query(F.data == "admin:bl:add_phone")
-async def admin_bl_add_phone(call: CallbackQuery, state: FSMContext):
-    await call.message.edit_text(
-        "Введите <b>номер телефона</b> для блокировки (например, +79991234567).\n\n"
-        "Для отмены — /admin",
-        parse_mode="HTML",
-    )
-    await state.set_state(BlacklistStates.add_phone)
-
-
-@dp.message(BlacklistStates.add_username)
-async def admin_bl_save_username(message: Message, state: FSMContext):
-    if message.text == "/admin":
-        await state.clear()
-        await show_admin_menu(message, state)
-        return
-    value = message.text.strip()
-    if not value.startswith("@"):
-        value = "@" + value
-    if add_to_blacklist("username", value):
-        await message.answer(f"✅ <b>{value}</b> добавлен в чёрный список.", parse_mode="HTML")
-    else:
-        await message.answer("⚠️ Уже в списке или некорректное значение.")
-    await state.clear()
-    await show_admin_menu(message, state)
-
-
-@dp.message(BlacklistStates.add_phone)
-async def admin_bl_save_phone(message: Message, state: FSMContext):
-    if message.text == "/admin":
-        await state.clear()
-        await show_admin_menu(message, state)
-        return
-    value = message.text.strip()
-    if add_to_blacklist("phone", value):
-        await message.answer(f"✅ <code>{value}</code> добавлен в чёрный список.", parse_mode="HTML")
-    else:
-        await message.answer("⚠️ Уже в списке или некорректное значение.")
-    await state.clear()
-    await show_admin_menu(message, state)
-
-
-@dp.callback_query(F.data == "admin:bl:remove")
-async def admin_bl_remove_start(call: CallbackQuery):
-    if not blacklist:
-        await call.answer("ЧС пуст", show_alert=True)
-        return
-
-    buttons = []
-    for key, item in blacklist.items():
-        icon = "📱" if item.get("type") == "phone" else "🔗"
-        label = f"{icon} {item.get('value')}"
-        buttons.append([InlineKeyboardButton(
-            text=label,
-            callback_data=f"admin:bl:del:{key}"
-        )])
-    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="admin:blacklist")])
-    await call.message.edit_text(
-        "Выберите запись для удаления:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
-    )
-
-
-@dp.callback_query(F.data.startswith("admin:bl:del:"))
-async def admin_bl_remove_confirm(call: CallbackQuery, state: FSMContext):
-    key = call.data.split(":", 3)[3]
-    item = blacklist.get(key)
-    if not item:
-        await call.answer("Запись не найдена")
-        return
-
-    value = item.get("value")
-    if remove_from_blacklist(value):
-        await call.answer(f"Удалено: {value}")
-    else:
-        await call.answer("Ошибка удаления")
-
-    await state.clear()
-    await admin_blacklist_menu(call, state)
-
-
-# ================== ПОПЫТКИ РЕГИСТРАЦИИ (АДМИН) ==================
-@dp.callback_query(F.data == "admin:reg_attempts")
-async def admin_reg_attempts(call: CallbackQuery):
-    if call.from_user.id != ADMIN_ID:
-        await call.answer("Только для админа", show_alert=True)
-        return
-
-    text = get_reg_attempts_text(limit=30)
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📤 Скачать CSV", callback_data="admin:reg_attempts:csv")],
-        [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin:back")],
-    ])
-    await call.message.edit_text(text[:4000], reply_markup=kb, parse_mode="HTML")
-
-
-@dp.callback_query(F.data == "admin:reg_attempts:csv")
-async def admin_reg_attempts_csv(call: CallbackQuery):
-    if call.from_user.id != ADMIN_ID:
-        await call.answer("Только для админа", show_alert=True)
-        return
-
-    if not reg_attempts:
-        await call.answer("Нет данных", show_alert=True)
-        return
-
-    rows = []
-    for a in reg_attempts:
-        rows.append([
-            a.get("user_id", ""),
-            a.get("username", ""),
-            a.get("first_name", ""),
-            a.get("phone", ""),
-            a.get("status", ""),
-            a.get("step", ""),
-            a.get("reason", ""),
-            a.get("attempted_at", ""),
-        ])
-
-    csv_bytes = make_csv(
-        ["user_id", "username", "first_name", "phone",
-         "status", "step", "reason", "attempted_at"],
-        rows,
-    )
-    file = BufferedInputFile(csv_bytes, filename="reg_attempts.csv")
-    await call.message.answer_document(
-        file,
-        caption=f"📊 Попыток регистрации: {len(reg_attempts)}\n"
-                f"Сформировано: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
-    )
-
-
-# ================== ПОЛЬЗОВАТЕЛИ (АДМИН) ==================
-USERS_PER_PAGE = 5
-
-
-def build_users_page(page: int):
-    user_ids = list(users.keys())
-    total = len(user_ids)
-
-    if total == 0:
-        return "📭 Пока нет зарегистрированных пользователей.", None
-
-    total_pages = (total + USERS_PER_PAGE - 1) // USERS_PER_PAGE
-    page = max(0, min(page, total_pages - 1))
-
-    start = page * USERS_PER_PAGE
-    end = start + USERS_PER_PAGE
-    page_ids = user_ids[start:end]
-
-    text = f"👥 <b>Пользователи</b> ({total} всего)\n"
-    text += f"Страница {page + 1} из {total_pages}\n\n"
-
-    for uid in page_ids:
-        u = users[uid]
-        text += format_user_info(uid, u)
-        text += "➖➖➖➖➖➖➖➖➖➖\n"
-
-    nav_buttons = []
-    if page > 0:
-        nav_buttons.append(InlineKeyboardButton(
-            text="⬅️ Назад", callback_data=f"admin:users:{page - 1}"
-        ))
-    if page < total_pages - 1:
-        nav_buttons.append(InlineKeyboardButton(
-            text="Вперёд ➡️", callback_data=f"admin:users:{page + 1}"
-        ))
-
-    kb_rows = []
-    if nav_buttons:
-        kb_rows.append(nav_buttons)
-
-    kb_rows.append([InlineKeyboardButton(
-        text="📤 Выгрузить всех в CSV", callback_data="admin:users:export"
-    )])
-    kb_rows.append([InlineKeyboardButton(
-        text="🔍 Найти по email или ID", callback_data="admin:users:search"
-    )])
-    kb_rows.append([InlineKeyboardButton(
-        text="⬅️ В админ-панель", callback_data="admin:back"
-    )])
-
-    return text, InlineKeyboardMarkup(inline_keyboard=kb_rows)
-
-
-@dp.callback_query(F.data.startswith("admin:users:"))
-async def admin_users(call: CallbackQuery, state: FSMContext):
-    if call.from_user.id != ADMIN_ID:
-        await call.answer("Только для админа", show_alert=True)
-        return
-
-    action = call.data.split(":")[2]
-
-    if action == "export":
-        if not users:
-            await call.answer("Нет пользователей", show_alert=True)
-            return
-        rows = []
-        for uid, u in users.items():
-            rows.append([
-                uid, u.get("username", ""), u.get("email", ""),
-                u.get("name", ""), u.get("surname", ""),
-                u.get("gender", ""), u.get("phone", ""),
-                u.get("registered_at", ""),
-            ])
-        csv_bytes = make_csv(
-            ["telegram_id", "username", "email", "name", "surname",
-             "gender", "phone", "registered_at"], rows,
-        )
-        file = BufferedInputFile(csv_bytes, filename="users.csv")
-        await call.message.answer_document(
-            file,
-            caption=f"👥 Пользователи: {len(users)}\n"
-                    f"Сформировано: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
-        )
-        await call.answer("Отправляю файл...")
-        return
-
-    if action == "search":
-        await call.message.answer(
-            "🔍 Отправьте <b>email</b>, <b>@username</b> или <b>Telegram ID</b>:",
-            parse_mode="HTML",
-        )
-        await state.set_state(Admin.search_user)
-        return
-
-    try:
-        page = int(action)
-    except ValueError:
-        page = 0
-
-    text, kb = build_users_page(page)
-    if kb is None:
-        await call.message.edit_text(text)
-    else:
-        await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
-
-
-@dp.message(Admin.search_user)
-async def admin_users_search_input(message: Message, state: FSMContext):
-    query = message.text.strip().lower()
-    await state.set_state(Admin.menu)
-
-    found = []
-    for uid, u in users.items():
-        if query == str(uid):
-            found.append((uid, u))
-            continue
-        email = (u.get("email") or "").lower()
-        username = (u.get("username") or "").lower()
-        query_clean = query.lstrip("@")
-        if query_clean and (query_clean in email or query_clean in username):
-            found.append((uid, u))
-
-    if not found:
-        await message.answer(
-            f"❌ Никого не найдено по запросу: <code>{query}</code>",
-            parse_mode="HTML",
-        )
-        return
-
-    text = f"🔍 Найдено: <b>{len(found)}</b>\n\n"
-    for uid, u in found[:10]:
-        text += format_user_info(uid, u)
-        text += "➖➖➖➖➖➖➖➖➖➖\n"
-
-    await message.answer(text, parse_mode="HTML")
-
-
-# ================== РАССЫЛКА ==================
-@dp.callback_query(F.data == "admin:broadcast")
-async def admin_broadcast_start(call: CallbackQuery, state: FSMContext):
-    if not users:
-        await call.answer("Нет пользователей", show_alert=True)
-        return
-    await call.message.edit_text(
-        f"📢 Отправьте сообщение для рассылки.\n\n"
-        f"Получателей: <b>{len(users)}</b>\n\n"
-        f"Поддерживается HTML: &lt;b&gt;жирный&lt;/b&gt;, &lt;i&gt;курсив&lt;/i&gt;\n\n"
-        f"Для отмены — /admin",
-        parse_mode="HTML",
-    )
-    await state.set_state(Admin.broadcast)
-
-
-@dp.message(Admin.broadcast)
-async def admin_broadcast_send(message: Message, state: FSMContext):
-    if message.text == "/admin":
-        await state.clear()
-        await show_admin_menu(message, state)
-        return
-
-    text = message.html_text if message.text else None
-    if not text:
-        await message.answer("❌ Отправьте текстовое сообщение.")
-        return
-
-    sent = 0
-    failed = 0
-    await message.answer(f"📢 Начинаю рассылку на {len(users)} чел...")
-
-    for uid in list(users.keys()):
-        try:
-            await bot.send_message(uid, text, parse_mode="HTML")
-            sent += 1
-        except Exception:
-            failed += 1
-        await asyncio.sleep(0.05)
-
-    await message.answer(
-        f"✅ Рассылка завершена.\n\n"
-        f"Отправлено: {sent}\n"
-        f"Ошибок: {failed}"
-    )
-    await state.clear()
-    await show_admin_menu(message, state)
-
-
-# ================== ПОИСК БИЛЕТА ==================
-@dp.callback_query(F.data == "admin:find_ticket")
-async def admin_find_ticket_start(call: CallbackQuery, state: FSMContext):
-    await call.message.edit_text(
-        "🎫 Отправьте код билета (например: <code>VIDA-XXXX-XXXX</code>)\n\n"
-        "Для отмены — /admin",
-        parse_mode="HTML",
-    )
-    await state.set_state(Admin.find_ticket)
-
-
-@dp.message(Admin.find_ticket)
-async def admin_find_ticket(message: Message, state: FSMContext):
-    if message.text == "/admin":
-        await state.clear()
-        await show_admin_menu(message, state)
-        return
-
-    code = message.text.strip().upper()
-    ticket = tickets.get(code)
-
-    if not ticket:
-        await message.answer("❌ Билет с таким кодом не найден.")
-        return
-
-    status = "✅ использован" if ticket.get("used") else "🟢 активен"
-    text = (
-        f"🎫 <b>Билет найден</b>\n\n"
-        f"Код: <code>{code}</code>\n"
-        f"Статус: {status}\n"
-        f"Владелец: {ticket['holder']}\n"
-        f"ID: <code>{ticket['user_id']}</code>\n"
-        f"Тип: {'Парный' if ticket['type'] == 'pair' else 'Обычный'}\n"
-        f"Событие: {ticket.get('event_title', '—')}\n"
-        f"Выдан: {ticket.get('issued_at', '—')}\n"
-    )
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[])
-    if not ticket.get("used"):
-        kb = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(
-                text="✅ Отметить как использованный",
-                callback_data=f"admin:use_ticket:{code}"
-            )
-        ]])
-
-    await message.answer(text, reply_markup=kb, parse_mode="HTML")
-
-
-@dp.callback_query(F.data.startswith("admin:use_ticket:"))
-async def admin_use_ticket(call: CallbackQuery):
-    code = call.data.split(":")[2]
-    ticket = tickets.get(code)
-    if not ticket:
-        await call.answer("Билет не найден")
-        return
-    ticket["used"] = True
-    save_data()
-    await call.message.edit_text(
-        f"✅ Билет <code>{code}</code> отмечен как использованный.",
-        parse_mode="HTML",
-    )
-
-
-# ================== КОСТЫЛЬ ДЛЯ RENDER FREE TIER ==================
-def start_keepalive_server():
-    """Запускает HTTP-сервер на порту в фоновом потоке."""
-    PORT = int(os.getenv("PORT", "10000"))
-
-    class Handler(http.server.SimpleHTTPRequestHandler):
-        def do_GET(self):
-            self.send_response(200)
-            self.send_header("Content-type", "text/plain")
-            self.end_headers()
-            self.wfile.write(b"OK")
-
-        def log_message(self, format, *args):
-            pass
-
-    class ReusableTCPServer(socketserver.ThreadingTCPServer):
-        allow_reuse_address = True
-
-    with ReusableTCPServer(("", PORT), Handler) as httpd:
-        print(f"[KEEPALIVE] HTTP-сервер запущен на порту {PORT}")
-        httpd.serve_forever()
-
-
-async def _self_ping_loop():
-    """Пингует свой URL каждые 10 минут."""
-    render_url = os.getenv("RENDER_EXTERNAL_URL", "")
-    if not render_url:
-        print("[KEEPALIVE] RENDER_EXTERNAL_URL не задан — самопинг отключён")
-        return
-
-    print(f"[KEEPALIVE] Самопинг активирован для {render_url}")
-    while True:
-        await asyncio.sleep(600)
-        try:
-            await asyncio.to_thread(urllib.request.urlopen, render_url, timeout=10)
-            print("[KEEPALIVE] Самопинг успешен")
-        except Exception as e:
-            print(f"[KEEPALIVE] Самопинг ошибка: {e}")
-
-
-def start_keepalive():
-    """Запускает HTTP-сервер в фоновом потоке."""
-    server_thread = threading.Thread(target=start_keepalive_server, daemon=True)
-    server_thread.start()
-
-
-def start_self_ping():
-    """Запускает самопинг в фоне (async)."""
-    asyncio.create_task(_self_ping_loop())
-
-
-# ================== ЗАПУСК ==================
-async def main():
-    load_data()
-    print("🚀 Бот запускается...")
-
-    start_keepalive()
-    start_self_ping()
-
-    me = await bot.get_me()
-    print(f"✅ Бот @{me.username} работает")
-    await dp.start_polling(bot)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())

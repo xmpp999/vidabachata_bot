@@ -200,6 +200,7 @@ def load_data():
     except Exception as e:
         print(f"[SUPABASE] Ошибка загрузки: {e}")
 
+
 # ================== ЮKASSA ==================
 def create_yookassa_payment(amount: int, description: str, user_id: int, metadata: dict) -> dict:
     """Создаёт платёж в ЮKassa. Возвращает dict с payment_id и confirmation_url."""
@@ -1188,15 +1189,25 @@ async def issue_ticket(user_id: int, code: str, ticket_type: str, holder_name: s
 
     qr_file = make_qr_image(code)
     type_label = "Парный" if ticket_type == "pair" else "Обычный"
+
+    # @username владельца
+    holder_user = users.get(user_id, {})
+    holder_username = holder_user.get("username") or ""
+
     caption = (
         f"🎫 <b>Ваш билет на {event.get('title', 'Vida Bachata')}</b>\n\n"
         f"👤 {holder_name}\n"
+    )
+    if holder_username:
+        caption += f"🔗 @{holder_username}\n"
+    caption += (
         f"🎟 {type_label}\n"
         f"📅 {event.get('date_text', '')}\n"
         f"📍 {event.get('place', '')}\n\n"
         f"Код: <code>{code}</code>\n\n"
         "Покажите QR на входе."
     )
+
     try:
         await bot.send_photo(user_id, qr_file, caption=caption, parse_mode="HTML")
     except Exception as e:
@@ -1246,25 +1257,61 @@ async def process_successful_payment(payment_id: str):
                 ticket_type, partner_name, event
             )
 
+    # ============ ДАННЫЕ ПОКУПАТЕЛЯ ============
+    buyer_user = users.get(user_id, {})
+    buyer_full_name = " ".join(filter(None, [
+        (buyer_user.get("name") or "").strip(),
+        (buyer_user.get("surname") or "").strip(),
+    ])).strip()
+    if not buyer_full_name:
+        buyer_full_name = buyer_name  # fallback на "Клиент"
+
+    buyer_username = buyer_user.get("username") or ""
+    buyer_phone = buyer_user.get("phone") or pending.get("phone", "") or "—"
+    ticket_type_label = "Парный" if ticket_type == "pair" else "Обычный"
+
+    # ============ УВЕДОМЛЕНИЕ АДМИНУ ============
+    admin_lines = [
+        f"💰 <b>Оплата получена!</b>\n",
+        f"💳 Платёж: <code>{payment_id}</code>\n",
+        f"🎉 {event.get('title', '')}\n",
+        f"📅 {event.get('date_text', '')}\n",
+        "\n",
+        f"👤 <b>{buyer_full_name}</b>\n",
+        f"🆔 <code>{user_id}</code>\n",
+    ]
+    if buyer_username:
+        admin_lines.append(f"🔗 @{buyer_username}\n")
+    admin_lines.append(f"📱 {buyer_phone}\n")
+    admin_lines.append("\n")
+    admin_lines.append(f"🎫 {ticket_type_label} | {pending['price']} ₽\n")
+
     try:
         await bot.send_message(
             ADMIN_ID,
-            f"💰 <b>Оплата получена!</b>\n\n"
-            f"💳 Платёж: <code>{payment_id}</code>\n"
-            f"🎉 {event.get('title', '')}\n"
-            f"👤 {buyer_name} | {pending.get('phone', '')}\n"
-            f"🎫 {ticket_type} | {pending['price']} ₽",
+            "".join(admin_lines),
             parse_mode="HTML",
         )
     except Exception:
         pass
 
+    # ============ УВЕДОМЛЕНИЕ КЛИЕНТУ ============
+    client_lines = [
+        "✅ <b>Оплата прошла!</b>\n\n",
+        f"👤 {buyer_full_name}\n",
+        f"🎉 {event.get('title', '')}\n",
+        f"📅 {event.get('date_text', '')}\n",
+    ]
+    if event.get("place"):
+        client_lines.append(f"📍 {event.get('place')}\n")
+    client_lines.append(f"🎫 {ticket_type_label} | {pending['price']} ₽\n\n")
+    client_lines.append("🎟 Билет отправлен выше ☝️\n")
+    client_lines.append("Покажите QR-код на входе.")
+
     try:
         await bot.send_message(
             user_id,
-            "✅ <b>Оплата получена!</b>\n\n"
-            "Ваш билет отправлен выше ☝️\n"
-            "Сохраните QR-код — покажите его на входе.",
+            "".join(client_lines),
             parse_mode="HTML",
         )
     except Exception:

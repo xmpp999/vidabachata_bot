@@ -17,6 +17,7 @@ import urllib.request
 import uuid
 from datetime import datetime, timedelta
 from email.message import EmailMessage
+from typing import Optional
 
 import aiosmtplib
 import dateparser
@@ -120,6 +121,7 @@ def save_data():
                     "used": t.get("used", False),
                     "event_id": t.get("event_id", ""),
                     "event_title": t.get("event_title", ""),
+                    "event_date": t.get("event_date", ""),
                     "issued_at": t.get("issued_at", ""),
                 })
             supabase.table("tickets").upsert(tickets_rows).execute()
@@ -166,6 +168,7 @@ def load_data():
                 "used": row.get("used", False),
                 "event_id": row.get("event_id", ""),
                 "event_title": row.get("event_title", ""),
+                "event_date": row.get("event_date", ""),
                 "issued_at": row.get("issued_at", ""),
             }
 
@@ -196,7 +199,6 @@ def load_data():
         )
     except Exception as e:
         print(f"[SUPABASE] Ошибка загрузки: {e}")
-
 
 # ================== ЮKASSA ==================
 def create_yookassa_payment(amount: int, description: str, user_id: int, metadata: dict) -> dict:
@@ -513,11 +515,13 @@ async def send_report_to_admin():
     tickets_rows = [[
         code, t["user_id"], t["holder"], t["type"],
         "использован" if t.get("used") else "активен",
+        t.get("event_title", ""), t.get("event_date", ""),
         t.get("issued_at", ""),
     ] for code, t in tickets.items()]
     tickets_csv = make_csv(
         ["ticket_code", "holder_telegram_id", "holder_name",
-         "type", "status", "issued_at"], tickets_rows
+         "type", "status", "event_title", "event_date", "issued_at"],
+        tickets_rows
     )
 
     attempts_rows = [[
@@ -1177,6 +1181,7 @@ async def issue_ticket(user_id: int, code: str, ticket_type: str, holder_name: s
         "used": False,
         "event_id": event.get("id", ""),
         "event_title": event.get("title", ""),
+        "event_date": event.get("date_text", ""),
         "issued_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
     }
     save_data()
@@ -1287,6 +1292,7 @@ async def show_admin_menu(message: Message, state: FSMContext):
         [InlineKeyboardButton(text="📊 Попытки регистрации", callback_data="admin:reg_attempts")],
         [InlineKeyboardButton(text="📈 Статистика", callback_data="admin:stats")],
         [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin:broadcast")],
+        [InlineKeyboardButton(text="🎟 Все билеты", callback_data="admin:tickets")],
         [InlineKeyboardButton(text="🎫 Найти билет", callback_data="admin:find_ticket")],
         [InlineKeyboardButton(text="📤 Отправить отчёт на email", callback_data="admin:report")],
     ])
@@ -1911,6 +1917,7 @@ async def admin_find_ticket(message: Message, state: FSMContext):
         f"ID: <code>{ticket['user_id']}</code>\n"
         f"Тип: {'Парный' if ticket['type'] == 'pair' else 'Обычный'}\n"
         f"Событие: {ticket.get('event_title', '—')}\n"
+        f"📅 Дата: <b>{ticket.get('event_date', '—')}</b>\n"
         f"Выдан: {ticket.get('issued_at', '—')}\n"
     )
 
@@ -1939,6 +1946,266 @@ async def admin_use_ticket(call: CallbackQuery):
         f"✅ Билет <code>{code}</code> отмечен как использованный.",
         parse_mode="HTML",
     )
+
+
+# ================== ВСЕ БИЛЕТЫ (АДМИН) ==================
+TICKETS_PER_PAGE = 5
+
+
+def _ticket_short_status(t: dict) -> str:
+    return "✅" if t.get("used") else "🟢"
+
+
+def _ticket_event_date(t: dict) -> str:
+    return t.get("event_date") or "—"
+
+
+def _ticket_event_title(t: dict) -> str:
+    return t.get("event_title") or "—"
+
+
+def _ticket_type_label(t: dict) -> str:
+    return "Парный" if t.get("type") == "pair" else "Обычный"
+
+
+def _ticket_price(t: dict) -> int:
+    return int(t.get("price", 0) or 0)
+
+
+def build_all_tickets_page(page: int, event_id: Optional[str] = None):
+    """Строит страницу со списком билетов. event_id=None → все события."""
+    if event_id:
+        items = [(code, t) for code, t in tickets.items()
+                 if str(t.get("event_id")) == str(event_id)]
+        ev = next((e for e in events if str(e["id"]) == str(event_id)), None)
+        if ev:
+            header = (
+                f"🎟 <b>Билеты события</b>\n"
+                f"🎉 <b>{ev['title']}</b>\n"
+                f"📅 <b>{ev['date_text']}</b>"
+            )
+        else:
+            header = f"🎟 <b>Билеты события</b> (id={event_id})"
+    else:
+        items = list(tickets.items())
+        header = "🎟 <b>Все билеты (по всем событиям)</b>"
+
+    total = len(items)
+
+    if total == 0:
+        text = header + "\n\n📭 Билетов пока нет."
+        kb_rows = [[InlineKeyboardButton(
+            text="⬅️ В админ-панель", callback_data="admin:back"
+        )]]
+        return text, InlineKeyboardMarkup(inline_keyboard=kb_rows)
+
+    items.sort(key=lambda kv: kv[1].get("issued_at", ""), reverse=True)
+
+    total_pages = (total + TICKETS_PER_PAGE - 1) // TICKETS_PER_PAGE
+    page = max(0, min(page, total_pages - 1))
+    start = page * TICKETS_PER_PAGE
+    page_items = items[start:start + TICKETS_PER_PAGE]
+
+    active_cnt = sum(1 for _, t in items if not t.get("used"))
+    used_cnt = total - active_cnt
+    revenue = sum(_ticket_price(t) for _, t in items)
+
+    text = header + "\n"
+    text += f"Всего: <b>{total}</b> | 🟢 активных: <b>{active_cnt}</b> | ✅ погашено: <b>{used_cnt}</b>\n"
+    text += f"💰 Выручка: <b>{revenue} ₽</b>\n"
+    text += f"Страница {page + 1} из {total_pages}\n\n"
+
+    for code, t in page_items:
+        text += (
+            f"{_ticket_short_status(t)} <code>{code}</code>\n"
+            f"   👤 {t.get('holder', '—')} (id: <code>{t.get('user_id', '—')}</code>)\n"
+            f"   🎫 {_ticket_type_label(t)}\n"
+            f"   🎉 {_ticket_event_title(t)}\n"
+            f"   📅 <b>{_ticket_event_date(t)}</b>\n"
+            f"   🕐 Выдан: {t.get('issued_at', '—')}\n"
+        )
+        text += "➖➖➖➖➖➖➖➖➖➖\n"
+
+    kb_rows = []
+    nav = []
+    prefix = f"admin:tickets:ev:{event_id}" if event_id else "admin:tickets:all"
+    if page > 0:
+        nav.append(InlineKeyboardButton(
+            text="⬅️ Назад", callback_data=f"{prefix}:{page - 1}"
+        ))
+    if page < total_pages - 1:
+        nav.append(InlineKeyboardButton(
+            text="Вперёд ➡️", callback_data=f"{prefix}:{page + 1}"
+        ))
+    if nav:
+        kb_rows.append(nav)
+
+    if event_id:
+        kb_rows.append([InlineKeyboardButton(
+            text="📤 Экспорт CSV (это событие)",
+            callback_data=f"admin:tickets:csv:{event_id}"
+        )])
+        kb_rows.append([InlineKeyboardButton(
+            text="⬅️ К списку событий", callback_data="admin:tickets:byevent"
+        )])
+    else:
+        kb_rows.append([InlineKeyboardButton(
+            text="📤 Экспорт CSV (все билеты)",
+            callback_data="admin:tickets:csv:all"
+        )])
+
+    kb_rows.append([InlineKeyboardButton(
+        text="⬅️ В админ-панель", callback_data="admin:back"
+    )])
+
+    return text, InlineKeyboardMarkup(inline_keyboard=kb_rows)
+
+
+@dp.callback_query(F.data == "admin:tickets")
+async def admin_tickets_root(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("Только для админа", show_alert=True)
+        return
+
+    total = len(tickets)
+    active = sum(1 for t in tickets.values() if not t.get("used"))
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="📋 По всем событиям",
+            callback_data="admin:tickets:all:0"
+        )],
+        [InlineKeyboardButton(
+            text="🎉 По конкретному событию",
+            callback_data="admin:tickets:byevent"
+        )],
+        [InlineKeyboardButton(
+            text="📤 Экспорт CSV (все)",
+            callback_data="admin:tickets:csv:all"
+        )],
+        [InlineKeyboardButton(
+            text="⬅️ В админ-панель", callback_data="admin:back"
+        )],
+    ])
+
+    text = (
+        f"🎟 <b>Билеты</b>\n\n"
+        f"Всего: <b>{total}</b>\n"
+        f"🟢 Активных: <b>{active}</b>\n"
+        f"✅ Погашено: <b>{total - active}</b>\n\n"
+        f"Выберите, как смотреть:"
+    )
+    await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+
+
+@dp.callback_query(F.data == "admin:tickets:byevent")
+async def admin_tickets_byevent(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("Только для админа", show_alert=True)
+        return
+
+    if not events:
+        await call.message.edit_text(
+            "📭 Нет событий.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="⬅️ Назад", callback_data="admin:tickets")
+            ]]),
+        )
+        return
+
+    buttons = []
+    for e in events:
+        cnt = sum(1 for t in tickets.values()
+                  if str(t.get("event_id")) == str(e["id"]))
+        buttons.append([InlineKeyboardButton(
+            text=f"{e['title']} — {e['date_text']} ({cnt} шт)",
+            callback_data=f"admin:tickets:ev:{e['id']}:0"
+        )])
+    buttons.append([InlineKeyboardButton(
+        text="⬅️ Назад", callback_data="admin:tickets"
+    )])
+
+    await call.message.edit_text(
+        "🎉 <b>Выберите событие</b> — покажу билеты только по нему:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+        parse_mode="HTML",
+    )
+
+
+@dp.callback_query(F.data.startswith("admin:tickets:all:"))
+async def admin_tickets_all(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("Только для админа", show_alert=True)
+        return
+    try:
+        page = int(call.data.split(":")[3])
+    except (IndexError, ValueError):
+        page = 0
+    text, kb = build_all_tickets_page(page, event_id=None)
+    await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+
+
+@dp.callback_query(F.data.startswith("admin:tickets:ev:"))
+async def admin_tickets_event(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("Только для админа", show_alert=True)
+        return
+    parts = call.data.split(":")
+    try:
+        event_id = parts[3]
+        page = int(parts[4])
+    except (IndexError, ValueError):
+        await call.answer("Ошибка данных", show_alert=True)
+        return
+    text, kb = build_all_tickets_page(page, event_id=event_id)
+    await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+
+
+@dp.callback_query(F.data.startswith("admin:tickets:csv:"))
+async def admin_tickets_csv(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("Только для админа", show_alert=True)
+        return
+
+    target = call.data.split(":")[3]
+
+    if target == "all":
+        items = list(tickets.items())
+        fname = "tickets_all.csv"
+    else:
+        items = [(c, t) for c, t in tickets.items()
+                 if str(t.get("event_id")) == str(target)]
+        fname = f"tickets_event_{target}.csv"
+
+    if not items:
+        await call.answer("Нет билетов", show_alert=True)
+        return
+
+    rows = []
+    for code, t in items:
+        rows.append([
+            code,
+            t.get("user_id", ""),
+            t.get("holder", ""),
+            _ticket_type_label(t),
+            _ticket_event_title(t),
+            _ticket_event_date(t),
+            "used" if t.get("used") else "active",
+            t.get("issued_at", ""),
+        ])
+
+    csv_bytes = make_csv(
+        ["code", "user_id", "holder", "type",
+         "event_title", "event_date", "status", "issued_at"],
+        rows,
+    )
+    file = BufferedInputFile(csv_bytes, filename=fname)
+    await call.message.answer_document(
+        file,
+        caption=f"🎟 Билетов: {len(items)}\n"
+                f"Сформировано: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+    )
+    await call.answer("Отправляю CSV...")
 
 
 # ================== КОСТЫЛЬ ДЛЯ RENDER ==================

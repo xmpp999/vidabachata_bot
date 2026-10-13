@@ -320,6 +320,7 @@ def get_blacklist_text() -> str:
         text += f"{icon} <code>{item.get('value')}</code>{reason}\n"
     return text
 
+
 # ================== ЛОГ ПОПЫТОК РЕГИСТРАЦИИ ==================
 def log_reg_attempt(
     user_id: int,
@@ -961,7 +962,6 @@ async def confirm_restart(call: CallbackQuery, state: FSMContext):
     )
     await state.set_state(Reg.phone)
 
-
 # ================== МЕРОПРИЯТИЯ ==================
 @dp.callback_query(F.data == "show_events")
 async def show_events(call: CallbackQuery):
@@ -1269,7 +1269,6 @@ async def process_successful_payment(payment_id: str):
         )
     except Exception:
         pass
-
 
 # ================== АДМИН ==================
 @dp.message(Command("admin"))
@@ -1909,12 +1908,12 @@ async def admin_find_ticket(message: Message, state: FSMContext):
         return
 
     status = "✅ использован" if ticket.get("used") else "🟢 активен"
+    holder_info = _ticket_holder_info(ticket).rstrip("\n")
     text = (
         f"🎫 <b>Билет найден</b>\n\n"
         f"Код: <code>{code}</code>\n"
-        f"Статус: {status}\n"
-        f"Владелец: {ticket['holder']}\n"
-        f"ID: <code>{ticket['user_id']}</code>\n"
+        f"Статус: {status}\n\n"
+        f"{holder_info}\n\n"
         f"Тип: {'Парный' if ticket['type'] == 'pair' else 'Обычный'}\n"
         f"Событие: {ticket.get('event_title', '—')}\n"
         f"📅 Дата: <b>{ticket.get('event_date', '—')}</b>\n"
@@ -1947,7 +1946,6 @@ async def admin_use_ticket(call: CallbackQuery):
         parse_mode="HTML",
     )
 
-
 # ================== ВСЕ БИЛЕТЫ (АДМИН) ==================
 TICKETS_PER_PAGE = 5
 
@@ -1970,6 +1968,107 @@ def _ticket_type_label(t: dict) -> str:
 
 def _ticket_price(t: dict) -> int:
     return int(t.get("price", 0) or 0)
+
+
+def _ticket_holder_info(t: dict) -> str:
+    """
+    Возвращает многострочную строку с данными владельца билета:
+    👤 Имя Фамилия (id: XXX)
+    📱 телефон
+    🔗 @username
+    Если юзер не найден — только holder + user_id.
+    """
+    uid = t.get("user_id")
+    holder = t.get("holder", "—")
+
+    user = None
+    try:
+        if uid is not None:
+            user = users.get(int(uid))
+    except (TypeError, ValueError):
+        user = None
+
+    if not user:
+        return f"👤 {holder} (id: <code>{uid}</code>)\n"
+
+    name = (user.get("name") or "").strip()
+    surname = (user.get("surname") or "").strip()
+    full_name = " ".join(filter(None, [name, surname])) or holder or "—"
+
+    phone = user.get("phone") or "—"
+    username = user.get("username") or ""
+
+    lines = [f"👤 {full_name} (id: <code>{uid}</code>)\n"]
+    lines.append(f"📱 {phone}\n")
+    if username:
+        lines.append(f"🔗 @{username}\n")
+    else:
+        lines.append("🔗 —\n")
+
+    return "".join(lines)
+
+
+def _ticket_csv_row(code: str, t: dict) -> list:
+    """
+    Возвращает строку для CSV:
+    Имя | Фамилия | Телефон | Telegram | Код | Тип |
+    Событие | Дата события | Дата покупки | Статус | Сумма
+    """
+    uid = t.get("user_id")
+    user = None
+    try:
+        if uid is not None:
+            user = users.get(int(uid))
+    except (TypeError, ValueError):
+        user = None
+
+    if user:
+        name = (user.get("name") or "").strip()
+        surname = (user.get("surname") or "").strip()
+        phone = user.get("phone") or ""
+        username = user.get("username") or ""
+        tg = f"@{username}" if username else ""
+    else:
+        holder = (t.get("holder") or "").strip()
+        parts = holder.split(maxsplit=1)
+        name = parts[0] if parts else ""
+        surname = parts[1] if len(parts) > 1 else ""
+        phone = ""
+        tg = ""
+
+    # Сумма — из билета или из заказа
+    price = _ticket_price(t)
+    if price == 0:
+        for o in orders:
+            if (str(o.get("user_id")) == str(uid)
+                    and str(o.get("event_id")) == str(t.get("event_id"))):
+                try:
+                    price = int(o.get("price", 0) or 0)
+                except (TypeError, ValueError):
+                    price = 0
+                break
+
+    return [
+        name,
+        surname,
+        phone,
+        tg,
+        code,
+        _ticket_type_label(t),
+        _ticket_event_title(t),
+        _ticket_event_date(t),
+        t.get("issued_at", ""),
+        "погашен" if t.get("used") else "активен",
+        price,
+    ]
+
+
+def _ticket_csv_headers() -> list:
+    return [
+        "Имя", "Фамилия", "Телефон", "Telegram",
+        "Код билета", "Тип", "Событие",
+        "Дата события", "Дата покупки", "Статус", "Сумма",
+    ]
 
 
 def build_all_tickets_page(page: int, event_id: Optional[str] = None):
@@ -2008,7 +2107,15 @@ def build_all_tickets_page(page: int, event_id: Optional[str] = None):
 
     active_cnt = sum(1 for _, t in items if not t.get("used"))
     used_cnt = total - active_cnt
-    revenue = sum(_ticket_price(t) for _, t in items)
+
+    # Сумма выручки
+    revenue = 0
+    for code, t in items:
+        row = _ticket_csv_row(code, t)
+        try:
+            revenue += int(row[-1])
+        except (TypeError, ValueError):
+            pass
 
     text = header + "\n"
     text += f"Всего: <b>{total}</b> | 🟢 активных: <b>{active_cnt}</b> | ✅ погашено: <b>{used_cnt}</b>\n"
@@ -2016,9 +2123,11 @@ def build_all_tickets_page(page: int, event_id: Optional[str] = None):
     text += f"Страница {page + 1} из {total_pages}\n\n"
 
     for code, t in page_items:
+        text += f"{_ticket_short_status(t)} <code>{code}</code>\n"
+        for line in _ticket_holder_info(t).split("\n"):
+            if line:
+                text += f"   {line}\n"
         text += (
-            f"{_ticket_short_status(t)} <code>{code}</code>\n"
-            f"   👤 {t.get('holder', '—')} (id: <code>{t.get('user_id', '—')}</code>)\n"
             f"   🎫 {_ticket_type_label(t)}\n"
             f"   🎉 {_ticket_event_title(t)}\n"
             f"   📅 <b>{_ticket_event_date(t)}</b>\n"
@@ -2172,41 +2281,53 @@ async def admin_tickets_csv(call: CallbackQuery):
     if target == "all":
         items = list(tickets.items())
         fname = "tickets_all.csv"
+        label = "все билеты"
     else:
         items = [(c, t) for c, t in tickets.items()
                  if str(t.get("event_id")) == str(target)]
         fname = f"tickets_event_{target}.csv"
+        ev = next((e for e in events if str(e["id"]) == str(target)), None)
+        label = f"событие «{ev['title']}»" if ev else f"событие {target}"
 
     if not items:
         await call.answer("Нет билетов", show_alert=True)
         return
 
-    rows = []
-    for code, t in items:
-        rows.append([
-            code,
-            t.get("user_id", ""),
-            t.get("holder", ""),
-            _ticket_type_label(t),
-            _ticket_event_title(t),
-            _ticket_event_date(t),
-            "used" if t.get("used") else "active",
-            t.get("issued_at", ""),
-        ])
+    items.sort(key=lambda kv: kv[1].get("issued_at", ""), reverse=True)
 
-    csv_bytes = make_csv(
-        ["code", "user_id", "holder", "type",
-         "event_title", "event_date", "status", "issued_at"],
-        rows,
-    )
+    rows = []
+    total_sum = 0
+    for code, t in items:
+        row = _ticket_csv_row(code, t)
+        rows.append(row)
+        try:
+            total_sum += int(row[-1])
+        except (TypeError, ValueError):
+            pass
+
+    # Итоговая строка
+    rows.append([])
+    rows.append(["", "", "", "", "", "", "", "", "", "ИТОГО:", total_sum])
+
+    csv_bytes = make_csv(_ticket_csv_headers(), rows)
     file = BufferedInputFile(csv_bytes, filename=fname)
+
+    active_cnt = sum(1 for _, t in items if not t.get("used"))
+    used_cnt = len(items) - active_cnt
+
     await call.message.answer_document(
         file,
-        caption=f"🎟 Билетов: {len(items)}\n"
-                f"Сформировано: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+        caption=(
+            f"🎟 <b>Билеты</b> — {label}\n\n"
+            f"Всего: <b>{len(items)}</b>\n"
+            f"🟢 Активных: <b>{active_cnt}</b>\n"
+            f"✅ Погашено: <b>{used_cnt}</b>\n"
+            f"💰 Сумма: <b>{total_sum} ₽</b>\n\n"
+            f"Сформировано: {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        ),
+        parse_mode="HTML",
     )
     await call.answer("Отправляю CSV...")
-
 
 # ================== КОСТЫЛЬ ДЛЯ RENDER ==================
 _main_loop = None

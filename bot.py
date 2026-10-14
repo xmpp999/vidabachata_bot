@@ -22,6 +22,7 @@ from typing import Optional
 import aiosmtplib
 import dateparser
 import qrcode
+import requests
 import resend
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command, CommandObject
@@ -34,6 +35,7 @@ from aiogram.types import (
     ReplyKeyboardRemove,
 )
 from dotenv import load_dotenv
+from PIL import Image
 from supabase import create_client, Client
 from yookassa import Configuration, Payment
 
@@ -82,6 +84,8 @@ blacklist = {}
 reg_attempts = []
 pending_payments = {}
 processed_payments = set()  # ID платежей, которые уже обработаны (защита от двойной оплаты)
+checkers = {}               # админы на входе: {checker_id: {...}}
+ticket_logs = []            # логи погашения билетов (буфер, сбрасывается в БД)
 
 settings = {
     "support": os.getenv("SUPPORT", "@your_support"),
@@ -130,13 +134,39 @@ def save_data():
         if orders:
             supabase.table("orders").upsert(orders).execute()
 
+        if checkers:
+            # Пересоздаём целиком (upsert по user_id=NULL не работает)
+            checkers_rows = []
+            for chk_id, c in checkers.items():
+                checkers_rows.append({
+                    "user_id": c.get("user_id"),
+                    "username": c.get("username", ""),
+                    "phone": c.get("phone", ""),
+                    "name": c.get("name", ""),
+                    "event_id": c.get("event_id"),
+                    "added_by": c.get("added_by"),
+                    "added_at": c.get("added_at", ""),
+                    "active": c.get("active", True),
+                })
+            supabase.table("checkers").delete().neq("id", 0).execute()
+            if checkers_rows:
+                supabase.table("checkers").insert(checkers_rows).execute()
+
+        if ticket_logs:
+            for log in ticket_logs:
+                try:
+                    supabase.table("ticket_logs").insert(log).execute()
+                except Exception:
+                    pass
+            ticket_logs.clear()
+
     except Exception as e:
         print(f"[SUPABASE] Ошибка сохранения: {e}")
 
 
 def load_data():
     """Загружает всё из Supabase в память."""
-    global events, orders, tickets, users, username_index, blacklist, reg_attempts
+    global events, orders, tickets, users, username_index, blacklist, reg_attempts, checkers
     try:
         resp = supabase.table("users").select("*").execute()
         users = {}
@@ -192,12 +222,31 @@ def load_data():
         resp = supabase.table("reg_attempts").select("*").order("id", desc=False).limit(500).execute()
         reg_attempts = resp.data or []
 
+        # Загружаем админов на входе
+        resp = supabase.table("checkers").select("*").execute()
+        checkers = {}
+        for row in resp.data:
+            chk_id = f"chk_{row['id']}"
+            checkers[chk_id] = {
+                "id": chk_id,
+                "db_id": row["id"],
+                "user_id": row.get("user_id"),
+                "username": (row.get("username") or "").lstrip("@").lower(),
+                "phone": row.get("phone") or "",
+                "name": row.get("name") or "",
+                "event_id": row.get("event_id"),
+                "added_by": row.get("added_by"),
+                "added_at": row.get("added_at", ""),
+                "active": row.get("active", True),
+            }
+
         print(
             f"✅ Загружено из Supabase: {len(events)} событий, "
             f"{len(orders)} заказов, {len(users)} юзеров, "
             f"{len(tickets)} билетов, {len(blacklist)} в ЧС, "
             f"{len(reg_attempts)} попыток"
         )
+        print(f"   └ Checkers: {len(checkers)}")
     except Exception as e:
         print(f"[SUPABASE] Ошибка загрузки: {e}")
 
@@ -252,7 +301,6 @@ def verify_payment_with_yookassa(payment_id: str) -> bool:
             print(f"[YOOKASSA] Платёж {payment_id} имеет статус {payment.status}, не succeeded")
             return False
 
-        # Дополнительно: проверяем что платёж от нашего магазина
         try:
             if str(payment.amount.value) and payment.amount.currency != "RUB":
                 print(f"[YOOKASSA] Платёж {payment_id} не в рублях")
@@ -493,6 +541,159 @@ def format_user_info(user_id: int, u: dict) -> str:
     )
 
 
+# ================== УТИЛИТЫ ДЛЯ CHECKER'ОВ ==================
+def find_checker_for_user(user_id: int, username: str = "", phone: str = "") -> Optional[dict]:
+    """
+    Ищет checker'а по user_id, username или телефону.
+    Возвращает dict checker'а или None.
+    """
+    # 1. По user_id (уже активированный)
+    for chk_id, c in checkers.items():
+        if not c.get("active", True):
+            continue
+        if c.get("user_id") and int(c["user_id"]) == int(user_id):
+            return c
+
+    # 2. По username
+    if username:
+        u = username.lower().lstrip("@")
+        for chk_id, c in checkers.items():
+            if not c.get("active", True):
+                continue
+            if c.get("username") and c["username"] == u:
+                return c
+
+    # 3. По телефону
+    if phone:
+        p = phone.replace(" ", "").replace("-", "").replace("+", "")
+        for chk_id, c in checkers.items():
+            if not c.get("active", True):
+                continue
+            c_phone = (c.get("phone") or "").replace(" ", "").replace("-", "").replace("+", "")
+            if c_phone and c_phone == p:
+                return c
+
+    return None
+
+
+def activate_checker(chk_id: str, user_id: int):
+    """Привязывает user_id к checker'у после активации."""
+    if chk_id in checkers:
+        checkers[chk_id]["user_id"] = user_id
+        save_data()
+
+
+def checker_can_access_event(checker: dict, event_id: str) -> bool:
+    """
+    Проверяет, может ли checker погасить билет этого события.
+    Если у checker'а event_id=None — может всё.
+    Иначе — только своё событие.
+    """
+    if not checker:
+        return False
+    if checker.get("event_id") is None:
+        return True
+    return str(checker.get("event_id")) == str(event_id)
+
+
+def get_checker_events(checker: dict) -> list:
+    """Возвращает список событий, доступных checker'у."""
+    if not checker:
+        return []
+    if checker.get("event_id") is None:
+        return list(events)
+    return [e for e in events if str(e["id"]) == str(checker.get("event_id"))]
+
+
+def log_ticket_action(ticket_code: str, checker: dict, action: str):
+    """Пишет в лог: кто погасил билет."""
+    log_entry = {
+        "ticket_code": ticket_code,
+        "checker_user_id": checker.get("user_id"),
+        "checker_name": checker.get("name", "—"),
+        "event_id": checker.get("event_id"),
+        "action": action,
+        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    ticket_logs.append(log_entry)
+    try:
+        supabase.table("ticket_logs").insert(log_entry).execute()
+    except Exception as e:
+        print(f"[SUPABASE] Ошибка лога билета: {e}")
+
+
+# ================== УТИЛИТЫ ДЛЯ QR ==================
+def compress_image_for_qr(image_bytes: bytes, max_kb: int = 950) -> bytes:
+    """
+    Сжимает изображение до размера < max_kb (по умолчанию 950 КБ).
+    Возвращает JPEG-байты.
+    """
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+        img = img.convert("RGB")
+
+        quality = 90
+        while quality >= 20:
+            buffer = io.BytesIO()
+            img.save(buffer, format="JPEG", quality=quality, optimize=True)
+            if buffer.tell() / 1024 <= max_kb:
+                return buffer.getvalue()
+            quality -= 10
+
+        # Fallback: уменьшаем разрешение
+        max_dim = 1200
+        while max_dim >= 400:
+            img.thumbnail((max_dim, max_dim), Image.LANCZOS)
+            buffer = io.BytesIO()
+            img.save(buffer, format="JPEG", quality=80, optimize=True)
+            if buffer.tell() / 1024 <= max_kb:
+                return buffer.getvalue()
+            max_dim -= 200
+
+        # Отдаём что есть
+        return buffer.getvalue()
+    except Exception as e:
+        print(f"[QR] Ошибка сжатия: {e}")
+        return image_bytes
+
+
+def decode_qr_via_qrserver(image_bytes: bytes) -> Optional[str]:
+    """
+    Распознаёт QR-код через api.qrserver.com.
+    Возвращает распознанный текст (код билета) или None.
+    """
+    url = "https://api.qrserver.com/v1/read-qr-code/?outputformat=json"
+    files = {"file": ("qr.jpg", image_bytes, "image/jpeg")}
+
+    try:
+        resp = requests.post(url, files=files, timeout=15)
+        data = resp.json()
+
+        if not data or not isinstance(data, list):
+            print(f"[QR] Неожиданный ответ: {data}")
+            return None
+
+        symbol = data[0].get("symbol", [])
+        if not symbol:
+            print("[QR] Символы не найдены")
+            return None
+
+        item = symbol[0]
+        if item.get("error"):
+            print(f"[QR] Ошибка декодирования: {item['error']}")
+            return None
+
+        decoded = (item.get("data") or "").strip()
+        if decoded:
+            print(f"[QR] Распознано: {decoded}")
+            return decoded
+
+        return None
+    except Exception as e:
+        print(f"[QR] Ошибка API: {e}")
+        return None
+
+
 async def send_email_code(email: str, code: str) -> bool:
     """Отправляет код подтверждения через Resend API."""
     if not RESEND_API_KEY:
@@ -610,6 +811,7 @@ async def send_report_to_admin():
     except Exception as e:
         print(f"[EMAIL] Ошибка: {e}")
 
+
 # ================== СОСТОЯНИЯ ==================
 class Reg(StatesGroup):
     phone = State()
@@ -637,12 +839,26 @@ class Admin(StatesGroup):
     broadcast = State()
     settings_edit = State()
     search_user = State()
+    # === Checkers (админы на входе) ===
+    checker_add_username = State()
+    checker_add_phone = State()
+    checker_add_name = State()
+    checker_choose_event = State()
+    checker_temp_data = State()  # промежуточные данные
 
 
 class BlacklistStates(StatesGroup):
     add_username = State()
     add_phone = State()
     pending_type = State()
+
+
+class CheckerStates(StatesGroup):
+    """Состояния для админов на входе."""
+    menu = State()
+    waiting_qr = State()
+    find_code = State()
+    find_name = State()
 
 
 # ================== /start ==================
@@ -652,6 +868,14 @@ async def start_with_invite(message: Message, state: FSMContext, command: Comman
 
     if message.from_user.id == ADMIN_ID:
         return await start(message, state)
+
+    # Проверяем, не checker ли это
+    checker = find_checker_for_user(
+        user_id=message.from_user.id,
+        username=message.from_user.username or "",
+    )
+    if checker:
+        return await checker_start(message, state, checker)
 
     if message.from_user.id in users:
         return await start(message, state)
@@ -699,11 +923,11 @@ async def start(message: Message, state: FSMContext):
     user_id = message.from_user.id
     user_name = message.from_user.first_name or "друг"
 
-    # ============ АДМИН ============
+    # ============ ГЛАВНЫЙ АДМИН ============
     if user_id == ADMIN_ID:
         greeting = (
             f"Привет, {user_name} 👋\n"
-            "Вы вошли как <b>администратор</b>.\n\n"
+            "Вы вошли как <b>главный администратор</b>.\n\n"
             "Используйте панель ниже для управления ботом.\n\n"
             "Подпишитесь на соцсети:\n"
             "ВК (https://vk.com/vidabachata) • "
@@ -718,6 +942,33 @@ async def start(message: Message, state: FSMContext):
         ])
         await message.answer(greeting, reply_markup=kb, parse_mode="HTML")
         return
+
+    # ============ CHECKER (админ на входе) ============
+    checker = find_checker_for_user(
+        user_id=user_id,
+        username=message.from_user.username or "",
+    )
+
+    # Если checker найден по username, но phone ещё не проверен и user_id не привязан
+    if checker and not checker.get("user_id") and checker.get("phone"):
+        # Требуется подтверждение телефона
+        await message.answer(
+            f"👋 {user_name}, вы — админ на входе.\n\n"
+            "Для активации доступа поделитесь контактом:",
+            reply_markup=ReplyKeyboardMarkup(
+                keyboard=[[KeyboardButton(text="📱 Поделиться контактом", request_contact=True)]],
+                resize_keyboard=True, one_time_keyboard=True,
+            ),
+        )
+        await state.update_data(checker_id=checker["id"])
+        await state.set_state(CheckerStates.menu)
+        return
+
+    if checker:
+        # Активируем (привязываем user_id, если ещё нет)
+        if not checker.get("user_id"):
+            activate_checker(checker["id"], user_id)
+        return await checker_start(message, state, checker)
 
     # ============ ПРОВЕРКА ЧС ============
     if is_blacklisted(username=message.from_user.username or ""):
@@ -775,6 +1026,14 @@ async def start_registration(call: CallbackQuery, state: FSMContext):
         await call.answer("Вы администратор, регистрация не нужна 👍", show_alert=True)
         return
 
+    checker = find_checker_for_user(
+        user_id=call.from_user.id,
+        username=call.from_user.username or "",
+    )
+    if checker:
+        await call.answer("Вы админ на входе 👍", show_alert=True)
+        return
+
     if is_blacklisted(username=call.from_user.username or ""):
         log_reg_attempt(
             user_id=call.from_user.id,
@@ -824,6 +1083,21 @@ async def start_registration(call: CallbackQuery, state: FSMContext):
 @dp.message(Reg.phone, F.contact)
 async def get_phone(message: Message, state: FSMContext):
     phone = message.contact.phone_number
+
+    # Сначала проверяем — может это checker с телефоном?
+    checker = find_checker_for_user(
+        user_id=message.from_user.id,
+        username=message.from_user.username or "",
+        phone=phone,
+    )
+    if checker:
+        activate_checker(checker["id"], message.from_user.id)
+        await message.answer(
+            f"✅ Ваш номер подтверждён. Добро пожаловать!",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        await state.clear()
+        return await checker_start(message, state, checker)
 
     if is_blacklisted(phone=phone):
         log_reg_attempt(
@@ -997,491 +1271,536 @@ async def confirm_restart(call: CallbackQuery, state: FSMContext):
     )
     await state.set_state(Reg.phone)
 
-# ================== МЕРОПРИЯТИЯ ==================
-@dp.callback_query(F.data == "show_events")
-async def show_events(call: CallbackQuery):
-    now = datetime.now()
-    upcoming = [
-        e for e in events
-        if e.get("active", True) and datetime.fromisoformat(e["start_dt"]) > now
-    ]
 
-    if not upcoming:
-        await call.message.answer("😔 Пока нет доступных событий.")
+# ================== ПАНЕЛЬ CHECKER'А ==================
+async def checker_start(message: Message, state: FSMContext, checker: dict):
+    """Панель администратора на входе."""
+    await state.clear()
+    await state.set_state(CheckerStates.menu)
+
+    name = checker.get("name") or message.from_user.first_name or "коллега"
+    event_id = checker.get("event_id")
+
+    if event_id is None:
+        access_text = "🌐 <b>Все вечеринки</b>"
+    else:
+        ev = next((e for e in events if str(e["id"]) == str(event_id)), None)
+        if ev:
+            access_text = f"🎯 <b>{ev['title']}</b>\n📅 {ev['date_text']}"
+        else:
+            access_text = f"🎯 Событие (id={event_id})"
+
+    text = (
+        f"👋 Привет, <b>{name}</b>!\n\n"
+        f"🎫 Вы — <b>администратор на входе</b>.\n\n"
+        f"Область доступа:\n{access_text}\n\n"
+        "Выберите действие:"
+    )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📷 Сканировать QR-код", callback_data="checker:scan_qr")],
+        [InlineKeyboardButton(text="🔍 Найти билет по коду", callback_data="checker:find_code")],
+        [InlineKeyboardButton(text="👤 Найти по имени/телефону", callback_data="checker:find_name")],
+        [InlineKeyboardButton(text="📊 Статистика входа", callback_data="checker:stats")],
+    ])
+
+    await message.answer(text, reply_markup=kb, parse_mode="HTML")
+
+
+@dp.callback_query(F.data == "checker:menu")
+async def checker_menu_callback(call: CallbackQuery, state: FSMContext):
+    checker = find_checker_for_user(
+        user_id=call.from_user.id,
+        username=call.from_user.username or "",
+    )
+    if not checker:
+        await call.answer("Вы не админ на входе", show_alert=True)
+        return
+    await state.clear()
+    # Переиспользуем: отправляем новое сообщение
+    await checker_start(call.message, state, checker)
+    await call.answer()
+
+
+@dp.message(F.contact, CheckerStates.menu)
+async def checker_phone_confirm(message: Message, state: FSMContext):
+    """Обработка подтверждения телефона для checker'а."""
+    phone = message.contact.phone_number
+
+    checker = find_checker_for_user(
+        user_id=message.from_user.id,
+        username=message.from_user.username or "",
+        phone=phone,
+    )
+    if not checker:
+        await message.answer(
+            "❌ Ваш номер не найден в списке админов на входе.\n"
+            "Обратитесь к главному администратору.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        await state.clear()
         return
 
-    buttons = []
-    for e in upcoming:
-        buttons.append([InlineKeyboardButton(
-            text=f"💃 {e['title']} — {e['date_text']}",
-            callback_data=f"event:{e['id']}"
-        )])
+    activate_checker(checker["id"], message.from_user.id)
+    await message.answer("✅ Номер подтверждён!", reply_markup=ReplyKeyboardRemove())
+    await checker_start(message, state, checker)
+
+
+@dp.message(CheckerStates.menu)
+async def checker_any_message(message: Message, state: FSMContext):
+    """Если checker пишет что-то вручную — подсказываем."""
+    await message.answer(
+        "Используйте кнопки ниже 👇\n"
+        "Или отправьте /start для возврата в меню.",
+    )
+
+
+# ================== СКАНИРОВАНИЕ QR ==================
+@dp.callback_query(F.data == "checker:scan_qr")
+async def checker_scan_qr(call: CallbackQuery, state: FSMContext):
+    checker = find_checker_for_user(
+        user_id=call.from_user.id,
+        username=call.from_user.username or "",
+    )
+    if not checker:
+        await call.answer("Вы не админ на входе", show_alert=True)
+        return
 
     await call.message.answer(
-        "🎉 <b>Выберите мероприятие:</b>",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+        "📷 <b>Сканирование QR</b>\n\n"
+        "Отправьте <b>фото</b> с QR-кодом билета.\n\n"
+        "Совет:\n"
+        "• Наведите камеру так, чтобы QR был целиком в кадре\n"
+        "• Хорошее освещение\n"
+        "• Держите камеру ровно\n\n"
+        "Для отмены — /start",
+        parse_mode="HTML",
+    )
+    await state.set_state(CheckerStates.waiting_qr)
+
+
+@dp.message(CheckerStates.waiting_qr, F.photo)
+async def checker_process_qr_photo(message: Message, state: FSMContext):
+    """Обработка фото с QR-кодом."""
+    checker = find_checker_for_user(
+        user_id=message.from_user.id,
+        username=message.from_user.username or "",
+    )
+    if not checker:
+        await message.answer("⛔ Вы не админ на входе.")
+        await state.clear()
+        return
+
+    msg = await message.answer("🔍 Распознаю QR-код...")
+
+    try:
+        # Берём самое большое фото (последнее)
+        photo = message.photo[-1]
+        file = await bot.get_file(photo.file_id)
+        file_bytes = await bot.download_file(file.file_path)
+        image_bytes = file_bytes.read()
+
+        # Сжимаем до < 1 MiB (лимит qrserver)
+        compressed = await asyncio.to_thread(compress_image_for_qr, image_bytes)
+
+        # Распознаём через qrserver
+        code = await asyncio.to_thread(decode_qr_via_qrserver, compressed)
+
+        if not code:
+            await msg.edit_text(
+                "❌ Не удалось распознать QR-код.\n\n"
+                "Попробуйте:\n"
+                "• Сделать фото крупнее\n"
+                "• Улучшить освещение\n"
+                "• Или введите код вручную: /start → 🔍 Найти билет по коду",
+            )
+            await state.set_state(CheckerStates.menu)
+            return
+
+        # Ищем билет
+        ticket = tickets.get(code.upper().strip())
+        if not ticket:
+            await msg.edit_text(
+                f"⚠️ QR распознан: <code>{code}</code>\n\n"
+                "Но билет с таким кодом не найден в базе.",
+                parse_mode="HTML",
+            )
+            await state.set_state(CheckerStates.menu)
+            return
+
+        # Проверяем доступ к событию
+        if not checker_can_access_event(checker, ticket.get("event_id")):
+            ev = next(
+                (e for e in events if str(e["id"]) == str(ticket.get("event_id"))),
+                None
+            )
+            ev_title = ev["title"] if ev else "другое событие"
+            await msg.edit_text(
+                f"⛔ У вас нет доступа к этому событию.\n\n"
+                f"Билет относится к: <b>{ev_title}</b>",
+                parse_mode="HTML",
+            )
+            await state.set_state(CheckerStates.menu)
+            return
+
+        # Показываем карточку
+        await msg.delete()
+        await show_checker_ticket_card(message, code.upper().strip(), ticket)
+
+    except Exception as e:
+        print(f"[QR] Ошибка обработки: {e}")
+        await msg.edit_text("❌ Ошибка при обработке фото. Попробуйте ещё раз.")
+        await state.set_state(CheckerStates.menu)
+
+
+@dp.message(CheckerStates.waiting_qr)
+async def checker_wrong_qr_input(message: Message, state: FSMContext):
+    await message.answer(
+        "📷 Отправьте <b>фото</b> с QR-кодом.\n\n"
+        "Для отмены — /start",
         parse_mode="HTML",
     )
 
 
-# ================== МОИ БИЛЕТЫ (КЛИЕНТ) ==================
-@dp.callback_query(F.data == "my_tickets")
-async def my_tickets(call: CallbackQuery):
-    """Показывает все билеты текущего пользователя."""
-    user_id = call.from_user.id
+# ================== ПОИСК БИЛЕТА ПО КОДУ ==================
+@dp.callback_query(F.data == "checker:find_code")
+async def checker_find_code(call: CallbackQuery, state: FSMContext):
+    checker = find_checker_for_user(
+        user_id=call.from_user.id,
+        username=call.from_user.username or "",
+    )
+    if not checker:
+        await call.answer("Вы не админ на входе", show_alert=True)
+        return
 
-    user_tickets = [
-        (code, t) for code, t in tickets.items()
-        if str(t.get("user_id")) == str(user_id)
-    ]
+    await call.message.answer(
+        "🔍 <b>Поиск билета</b>\n\n"
+        "Отправьте <b>код билета</b> (например, <code>VIDA-XXXX-XXXX</code>).\n\n"
+        "Код написан под QR-кодом в билете гостя.\n\n"
+        "Для отмены — /start",
+        parse_mode="HTML",
+    )
+    await state.set_state(CheckerStates.find_code)
 
-    if not user_tickets:
-        await call.message.answer(
-            "🎟 <b>Мои билеты</b>\n\n"
-            "📭 У вас пока нет билетов.\n\n"
-            "Нажмите «🎉 Мероприятия» чтобы купить.",
+
+@dp.message(CheckerStates.find_code)
+async def checker_process_code(message: Message, state: FSMContext):
+    checker = find_checker_for_user(
+        user_id=message.from_user.id,
+        username=message.from_user.username or "",
+    )
+    if not checker:
+        await message.answer("⛔ Вы не админ на входе.")
+        await state.clear()
+        return
+
+    code = message.text.strip().upper()
+
+    ticket = tickets.get(code)
+    if not ticket:
+        await message.answer(
+            f"❌ Билет с кодом <code>{code}</code> не найден.",
             parse_mode="HTML",
         )
         return
 
-    # Сортируем: сначала активные, потом по дате события
-    user_tickets.sort(
-        key=lambda kv: (kv[1].get("used", False), kv[1].get("event_date", "")),
-    )
-
-    active_cnt = sum(1 for _, t in user_tickets if not t.get("used"))
-    used_cnt = len(user_tickets) - active_cnt
-
-    text = (
-        f"🎟 <b>Мои билеты</b>\n\n"
-        f"Всего: <b>{len(user_tickets)}</b>\n"
-        f"🟢 Активных: <b>{active_cnt}</b>\n"
-        f"✅ Использовано: <b>{used_cnt}</b>\n\n"
-    )
-
-    buttons = []
-    for code, t in user_tickets:
-        status = "✅" if t.get("used") else "🟢"
-        type_label = "Парный" if t.get("type") == "pair" else "Обычный"
-        event_title = t.get("event_title", "—")
-        event_date = t.get("event_date", "—")
-
-        text += (
-            f"{status} <code>{code}</code>\n"
-            f"   🎉 {event_title}\n"
-            f"   📅 {event_date}\n"
-            f"   🎫 {type_label}\n\n"
+    # Проверяем доступ
+    if not checker_can_access_event(checker, ticket.get("event_id")):
+        ev = next(
+            (e for e in events if str(e["id"]) == str(ticket.get("event_id"))),
+            None
         )
+        ev_title = ev["title"] if ev else "другое событие"
+        await message.answer(
+            f"⛔ У вас нет доступа к этому событию.\n\n"
+            f"Билет относится к: <b>{ev_title}</b>",
+            parse_mode="HTML",
+        )
+        return
 
-        if not t.get("used"):
-            buttons.append([InlineKeyboardButton(
-                text=f"📱 Показать QR — {code[-8:]}",
-                callback_data=f"my_ticket:{code}"
-            )])
+    await show_checker_ticket_card(message, code, ticket)
 
-    buttons.append([InlineKeyboardButton(
-        text="🎉 Мероприятия", callback_data="show_events"
-    )])
+
+# ================== ПОИСК ПО ИМЕНИ / ТЕЛЕФОНУ ==================
+@dp.callback_query(F.data == "checker:find_name")
+async def checker_find_name(call: CallbackQuery, state: FSMContext):
+    checker = find_checker_for_user(
+        user_id=call.from_user.id,
+        username=call.from_user.username or "",
+    )
+    if not checker:
+        await call.answer("Вы не админ на входе", show_alert=True)
+        return
 
     await call.message.answer(
+        "👤 <b>Поиск по имени или телефону</b>\n\n"
+        "Отправьте имя или номер телефона гостя.\n\n"
+        "Используется, если гость забыл код билета.\n\n"
+        "Для отмены — /start",
+        parse_mode="HTML",
+    )
+    await state.set_state(CheckerStates.find_name)
+
+
+@dp.message(CheckerStates.find_name)
+async def checker_process_name(message: Message, state: FSMContext):
+    checker = find_checker_for_user(
+        user_id=message.from_user.id,
+        username=message.from_user.username or "",
+    )
+    if not checker:
+        await message.answer("⛔ Вы не админ на входе.")
+        await state.clear()
+        return
+
+    query = message.text.strip().lower()
+    if len(query) < 2:
+        await message.answer("Слишком короткий запрос. Введите минимум 2 символа.")
+        return
+
+    # Ищем билеты
+    found = []
+    for code, t in tickets.items():
+        if not checker_can_access_event(checker, t.get("event_id")):
+            continue
+
+        holder = (t.get("holder") or "").lower()
+        uid = t.get("user_id")
+
+        # По имени holder'а
+        match = query in holder
+
+        # По данным пользователя
+        if not match and uid:
+            try:
+                u = users.get(int(uid), {})
+                full = f"{u.get('name', '')} {u.get('surname', '')}".lower()
+                phone = (u.get("phone") or "").replace(" ", "").replace("-", "").replace("+", "")
+                query_clean = query.replace(" ", "").replace("-", "").replace("+", "")
+                if query in full or (query_clean and query_clean in phone):
+                    match = True
+            except (TypeError, ValueError):
+                pass
+
+        if match:
+            found.append((code, t))
+
+    if not found:
+        await message.answer(
+            f"❌ По запросу «{query}» ничего не найдено.\n\n"
+            "Попробуйте другое имя или телефон.",
+        )
+        return
+
+    # Показываем до 10 результатов
+    text = f"🔍 Найдено: <b>{len(found)}</b>\n\n"
+    buttons = []
+    for code, t in found[:10]:
+        status = "✅" if t.get("used") else "🟢"
+        type_label = "Парный" if t.get("type") == "pair" else "Обычный"
+        text += (
+            f"{status} <code>{code}</code>\n"
+            f"   👤 {t.get('holder', '—')}\n"
+            f"   🎫 {type_label}\n"
+            f"   🎉 {t.get('event_title', '—')}\n\n"
+        )
+        buttons.append([InlineKeyboardButton(
+            text=f"Показать {code[-8:]}",
+            callback_data=f"checker:show:{code}"
+        )])
+
+    buttons.append([InlineKeyboardButton(
+        text="⬅️ В меню", callback_data="checker:menu"
+    )])
+
+    await message.answer(
         text,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
         parse_mode="HTML",
     )
 
 
-@dp.callback_query(F.data.startswith("my_ticket:"))
-async def show_my_ticket_qr(call: CallbackQuery):
-    """Показывает QR-код конкретного билета."""
-    code = call.data.split(":", 1)[1]
-    user_id = call.from_user.id
+@dp.callback_query(F.data.startswith("checker:show:"))
+async def checker_show_ticket(call: CallbackQuery):
+    code = call.data.split(":", 2)[2]
+
+    checker = find_checker_for_user(
+        user_id=call.from_user.id,
+        username=call.from_user.username or "",
+    )
+    if not checker:
+        await call.answer("Вы не админ на входе", show_alert=True)
+        return
 
     ticket = tickets.get(code)
     if not ticket:
         await call.answer("Билет не найден", show_alert=True)
         return
 
-    if str(ticket.get("user_id")) != str(user_id):
-        await call.answer("Это не ваш билет", show_alert=True)
+    if not checker_can_access_event(checker, ticket.get("event_id")):
+        await call.answer("Нет доступа к этому событию", show_alert=True)
         return
 
-    if ticket.get("used"):
-        await call.answer("Этот билет уже использован", show_alert=True)
-        return
-
-    event = next(
-        (e for e in events if str(e["id"]) == str(ticket.get("event_id"))),
-        None
-    )
-
-    qr_file = make_qr_image(code)
-    type_label = "Парный" if ticket.get("type") == "pair" else "Обычный"
-
-    caption = (
-        f"🎫 <b>Ваш билет</b>\n\n"
-        f"👤 {ticket.get('holder', '—')}\n"
-        f"🎟 {type_label}\n"
-        f"🎉 {ticket.get('event_title', '—')}\n"
-        f"📅 {ticket.get('event_date', '—')}\n"
-    )
-    if event and event.get("place"):
-        caption += f"📍 {event.get('place')}\n"
-    caption += (
-        f"\nКод: <code>{code}</code>\n\n"
-        "Покажите QR на входе."
-    )
-
-    await call.message.answer_photo(
-        qr_file,
-        caption=caption,
-        parse_mode="HTML",
-    )
     await call.answer()
+    await show_checker_ticket_card(call.message, code, ticket)
 
 
-@dp.callback_query(F.data.startswith("event:"))
-async def event_selected(call: CallbackQuery, state: FSMContext):
-    eid = call.data.split(":")[1]
-    event = next((e for e in events if e["id"] == eid), None)
-    if not event:
-        await call.answer("Событие не найдено")
-        return
+# ================== КАРТОЧКА БИЛЕТА ==================
+async def show_checker_ticket_card(message: Message, code: str, ticket: dict):
+    """Показывает карточку билета с кнопкой погашения."""
+    status = "✅ использован" if ticket.get("used") else "🟢 активен"
 
-    is_admin = (call.from_user.id == ADMIN_ID)
+    holder_name = ticket.get("holder", "—")
+    holder_username = ""
+    holder_phone = "—"
 
-    if not is_admin and call.from_user.id not in users:
-        await call.answer("Сначала пройдите регистрацию 📝", show_alert=True)
-        return
+    uid = ticket.get("user_id")
+    try:
+        if uid:
+            user = users.get(int(uid), {})
+            holder_username = user.get("username") or ""
+            holder_phone = user.get("phone") or "—"
+    except (TypeError, ValueError):
+        pass
 
-    if sales_closed(event):
-        await call.answer("❌ Продажа билетов закрыта", show_alert=True)
-        return
-
-    await state.update_data(event_id=eid, event=event)
-
-    if is_admin:
-        buttons = [[InlineKeyboardButton(
-            text="🔙 Закрыть",
-            callback_data="admin:back"
-        )]]
-    else:
-        buttons = [[InlineKeyboardButton(
-            text=f"🎫 Обычный — {event['price_single']} ₽",
-            callback_data="ticket:single"
-        )]]
-        if event.get("price_pair", 0) > 0:
-            buttons.append([InlineKeyboardButton(
-                text=f"💑 Парный — {event['price_pair']} ₽",
-                callback_data="ticket:pair"
-            )])
-
-    caption = (
-        f"🎉 <b>{event['title']}</b>\n\n"
-        f"📅 {event['date_text']}\n"
-        f"📍 {event['place']}\n\n"
-        f"{event['description']}\n\n"
-    )
-    if is_admin:
-        caption += "👁 <i>Режим просмотра (админ)</i>"
-    else:
-        caption += "Выберите тип билета:"
-
-    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
-
-    if event.get("photo_id"):
-        await call.message.answer_photo(
-            event["photo_id"], caption=caption,
-            reply_markup=kb, parse_mode="HTML"
-        )
-    else:
-        await call.message.answer(caption, reply_markup=kb, parse_mode="HTML")
-
-    await state.set_state(Reg.ticket_type)
-
-
-# ================== ОПЛАТА ЧЕРЕЗ ЮKASSA ==================
-@dp.callback_query(F.data == "ticket:single", Reg.ticket_type)
-async def ticket_single(call: CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    event = data.get("event")
-    if not event:
-        await call.answer("Ошибка")
-        return
-    await state.update_data(ticket_type="single", price=event["price_single"])
-    await go_to_payment(call.message, state)
-
-
-@dp.callback_query(F.data == "ticket:pair", Reg.ticket_type)
-async def ticket_pair(call: CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    event = data.get("event")
-    if not event or event.get("price_pair", 0) <= 0:
-        await call.answer("Парные недоступны")
-        return
-    await state.update_data(ticket_type="pair", price=event["price_pair"])
-    await call.message.edit_text(
-        "💑 Введите <b>@username</b> второго участника:",
-        parse_mode="HTML",
-    )
-    await state.set_state(Reg.partner_input)
-
-
-@dp.message(Reg.partner_input)
-async def partner_input(message: Message, state: FSMContext):
-    text = message.text.strip()
-    if not text.startswith("@") or len(text) < 3:
-        await message.answer("❌ Формат: <b>@username</b>", parse_mode="HTML")
-        return
-
-    partner_id = username_index.get(text.lower())
-    if partner_id == message.from_user.id:
-        await message.answer("❌ Нельзя себя.")
-        return
-
-    if partner_id and partner_id in users:
-        await state.update_data(partner_id=partner_id)
-        partner = users[partner_id]
-        await message.answer(
-            f"✅ Найден: {partner['name']} {partner['surname']}",
-        )
-        await go_to_payment(message, state)
-    else:
-        invite_link = f"https://t.me/{BOT_USERNAME}?start=invite_{message.from_user.id}"
-        await message.answer(
-            f"❌ Не найден. Отправьте ссылку:\n<code>{invite_link}</code>\n\n"
-            "После регистрации напишите /start заново.",
-            parse_mode="HTML",
-        )
-
-
-async def go_to_payment(message: Message, state: FSMContext):
-    """Создаёт платёж в ЮKassa и отправляет пользователю ссылку."""
-    data = await state.get_data()
-    price = data.get("price", 0)
-    ticket_type = data.get("ticket_type", "single")
-    event = data.get("event", {})
-    user_id = message.chat.id
-
-    ticket_label = "Парный" if ticket_type == "pair" else "Обычный"
-    description = f"{event.get('title', 'Билет')} — {ticket_label} билет"
-
-    payment = create_yookassa_payment(
-        amount=price,
-        description=description,
-        user_id=user_id,
-        metadata={
-            "event_id": data.get("event_id", ""),
-            "ticket_type": ticket_type,
-            "price": str(price),
-        },
-    )
-
-    if not payment:
-        await message.answer(
-            "❌ Ошибка при создании платежа. Попробуйте позже или напишите в поддержку."
-        )
-        return
-
-    payment_id = payment["payment_id"]
-    confirmation_url = payment["confirmation_url"]
-
-    pending_payments[payment_id] = {
-        "user_id": user_id,
-        "event_id": data.get("event_id", ""),
-        "event_title": event.get("title", ""),
-        "ticket_type": ticket_type,
-        "price": price,
-        "partner_id": data.get("partner_id"),
-        "name": f"{data.get('name', '')} {data.get('surname', '')}".strip(),
-        "phone": data.get("phone", ""),
-        "email": data.get("email", ""),
-    }
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"💳 Оплатить {price} ₽", url=confirmation_url)],
-        [InlineKeyboardButton(text="🆘 Техподдержка", url=f"https://t.me/{settings.get('support', '@your_support').lstrip('@')}")],
-        [InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_order")],
-    ])
-
-    await message.answer(
-        f"💳 <b>Билет: {ticket_label} — {price} ₽</b>\n\n"
-        f"🎉 {event.get('title', '')}\n"
-        f"📅 {event.get('date_text', '')}\n\n"
-        "1. Нажмите «Оплатить» — откроется страница ЮKassa.\n"
-        "2. Оплатите картой, СБП или другим способом.\n"
-        "3. После оплаты билет придёт автоматически в течение 1 минуты.\n\n"
-        "⏱ Страница оплаты активна 60 минут.",
-        reply_markup=kb, parse_mode="HTML",
-    )
-    await state.set_state(Reg.payment)
-
-
-@dp.callback_query(F.data == "cancel_order")
-async def cancel_order(call: CallbackQuery, state: FSMContext):
-    await state.clear()
-    await call.message.edit_text("❌ Отменено. /start — заново.")
-
-
-# ================== ВЫДАЧА БИЛЕТА ==================
-async def issue_ticket(user_id: int, code: str, ticket_type: str, holder_name: str, event: dict):
-    tickets[code] = {
-        "user_id": user_id,
-        "type": ticket_type,
-        "holder": holder_name,
-        "used": False,
-        "event_id": event.get("id", ""),
-        "event_title": event.get("title", ""),
-        "event_date": event.get("date_text", ""),
-        "issued_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
-    }
-    save_data()
-
-    qr_file = make_qr_image(code)
-    type_label = "Парный" if ticket_type == "pair" else "Обычный"
-
-    holder_user = users.get(user_id, {})
-    holder_username = holder_user.get("username") or ""
-
-    caption = (
-        f"🎫 <b>Ваш билет на {event.get('title', 'Vida Bachata')}</b>\n\n"
+    text = (
+        f"🎫 <b>Билет найден</b>\n\n"
+        f"Код: <code>{code}</code>\n"
+        f"Статус: {status}\n\n"
         f"👤 {holder_name}\n"
     )
     if holder_username:
-        caption += f"🔗 @{holder_username}\n"
-    caption += (
-        f"🎟 {type_label}\n"
-        f"📅 {event.get('date_text', '')}\n"
-        f"📍 {event.get('place', '')}\n\n"
-        f"Код: <code>{code}</code>\n\n"
-        "Покажите QR на входе."
+        text += f"🔗 @{holder_username}\n"
+    text += f"📱 {holder_phone}\n\n"
+    text += (
+        f"🎫 {_ticket_type_label(ticket)}\n"
+        f"🎉 {ticket.get('event_title', '—')}\n"
+        f"📅 {ticket.get('event_date', '—')}\n"
+        f"🕐 Выдан: {ticket.get('issued_at', '—')}\n"
     )
 
-    try:
-        await bot.send_photo(user_id, qr_file, caption=caption, parse_mode="HTML")
-    except Exception as e:
-        print(f"[TICKET] Ошибка отправки билета user={user_id}: {e}")
+    kb_rows = []
+    if not ticket.get("used"):
+        kb_rows.append([InlineKeyboardButton(
+            text="✅ Погасить билет",
+            callback_data=f"checker:use:{code}"
+        )])
+    kb_rows.append([InlineKeyboardButton(
+        text="📷 Сканировать ещё",
+        callback_data="checker:scan_qr"
+    )])
+    kb_rows.append([InlineKeyboardButton(
+        text="⬅️ В меню", callback_data="checker:menu"
+    )])
+
+    await message.answer(
+        text,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows),
+        parse_mode="HTML",
+    )
 
 
-async def process_successful_payment(payment_id: str):
-    """Обрабатывает успешную оплату с защитой от двойной обработки."""
-    # ============ ЗАЩИТА ОТ ДВОЙНОЙ ОПЛАТЫ ============
-    if payment_id in processed_payments:
-        print(f"[YOOKASSA] ⚠️ Платёж {payment_id} уже был обработан — пропускаем")
+@dp.callback_query(F.data.startswith("checker:use:"))
+async def checker_use_ticket(call: CallbackQuery):
+    """Погашение билета checker'ом."""
+    code = call.data.split(":", 2)[2]
+
+    checker = find_checker_for_user(
+        user_id=call.from_user.id,
+        username=call.from_user.username or "",
+    )
+    if not checker:
+        await call.answer("Вы не админ на входе", show_alert=True)
         return
 
-    pending = pending_payments.pop(payment_id, None)
-    if not pending:
-        print(f"[YOOKASSA] payment_id={payment_id} не найден в pending")
-        # Помечаем, чтобы webhook не спамил
-        processed_payments.add(payment_id)
+    ticket = tickets.get(code)
+    if not ticket:
+        await call.answer("Билет не найден", show_alert=True)
         return
 
-    # Помечаем ДО выдачи билета — защита от параллельных webhook
-    processed_payments.add(payment_id)
-    print(f"[YOOKASSA] ✅ Платёж {payment_id} принят в обработку")
-
-    user_id = pending["user_id"]
-    event = next((e for e in events if e["id"] == pending["event_id"]), None)
-    if not event:
-        print(f"[YOOKASSA] Событие {pending['event_id']} не найдено")
+    if not checker_can_access_event(checker, ticket.get("event_id")):
+        await call.answer("Нет доступа к этому событию", show_alert=True)
         return
 
-    ticket_type = pending["ticket_type"]
-    buyer_name = pending["name"] or "Клиент"
+    if ticket.get("used"):
+        await call.answer("Билет уже погашен", show_alert=True)
+        return
 
-    order = {
-        "order_id": next_order_id(),
-        "user_id": user_id,
-        "event_id": pending["event_id"],
-        "event_title": event.get("title", ""),
-        "email": pending.get("email", ""),
-        "name": buyer_name,
-        "ticket_type": ticket_type,
-        "price": pending["price"],
-        "paid_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
-    }
-    orders.append(order)
+    ticket["used"] = True
     save_data()
 
-    buyer_code = generate_ticket_code()
-    await issue_ticket(user_id, buyer_code, ticket_type, buyer_name, event)
+    # Логируем
+    log_ticket_action(code, checker, action="used")
 
-    if ticket_type == "pair" and pending.get("partner_id"):
-        partner_id = pending["partner_id"]
-        if partner_id in users:
-            partner = users[partner_id]
-            partner_name = f"{partner['name']} {partner['surname']}"
-            await issue_ticket(
-                partner_id, generate_ticket_code(),
-                ticket_type, partner_name, event
-            )
-
-    # ============ ДАННЫЕ ПОКУПАТЕЛЯ ============
-    buyer_user = users.get(user_id, {})
-    buyer_full_name = " ".join(filter(None, [
-        (buyer_user.get("name") or "").strip(),
-        (buyer_user.get("surname") or "").strip(),
-    ])).strip()
-    if not buyer_full_name:
-        buyer_full_name = buyer_name
-
-    buyer_username = buyer_user.get("username") or ""
-    buyer_phone = buyer_user.get("phone") or pending.get("phone", "") or "—"
-    ticket_type_label = "Парный" if ticket_type == "pair" else "Обычный"
-
-    # ============ УВЕДОМЛЕНИЕ АДМИНУ ============
-    admin_lines = [
-        f"💰 <b>Оплата получена!</b>\n",
-        f"💳 Платёж: <code>{payment_id}</code>\n",
-        f"🎉 {event.get('title', '')}\n",
-        f"📅 {event.get('date_text', '')}\n",
-        "\n",
-        f"👤 <b>{buyer_full_name}</b>\n",
-        f"🆔 <code>{user_id}</code>\n",
-    ]
-    if buyer_username:
-        admin_lines.append(f"🔗 @{buyer_username}\n")
-    admin_lines.append(f"📱 {buyer_phone}\n")
-    admin_lines.append("\n")
-    admin_lines.append(f"🎫 {ticket_type_label} | {pending['price']} ₽\n")
-
+    # Уведомляем главного админа
     try:
+        checker_name = checker.get("name") or call.from_user.full_name
         await bot.send_message(
             ADMIN_ID,
-            "".join(admin_lines),
+            f"🎫 <b>Билет погашен</b>\n\n"
+            f"Код: <code>{code}</code>\n"
+            f"🎉 {ticket.get('event_title', '—')}\n"
+            f"👤 {ticket.get('holder', '—')}\n\n"
+            f"Погасил: <b>{checker_name}</b>",
             parse_mode="HTML",
         )
     except Exception:
         pass
 
-    # ============ УВЕДОМЛЕНИЕ КЛИЕНТУ ============
-    client_lines = [
-        "✅ <b>Оплата прошла!</b>\n\n",
-        f"👤 {buyer_full_name}\n",
-        f"🎉 {event.get('title', '')}\n",
-        f"📅 {event.get('date_text', '')}\n",
-    ]
-    if event.get("place"):
-        client_lines.append(f"📍 {event.get('place')}\n")
-    client_lines.append(f"🎫 {ticket_type_label} | {pending['price']} ₽\n\n")
-    client_lines.append("🎟 Билет отправлен выше ☝️\n")
-    client_lines.append("Покажите QR-код на входе.")
+    checker_name = checker.get("name") or call.from_user.full_name
+    await call.message.edit_text(
+        f"✅ <b>Билет погашен</b>\n\n"
+        f"Код: <code>{code}</code>\n"
+        f"👤 {ticket.get('holder', '—')}\n"
+        f"🎉 {ticket.get('event_title', '—')}\n\n"
+        f"Погасил: {checker_name}",
+        parse_mode="HTML",
+    )
 
-    try:
-        await bot.send_message(
-            user_id,
-            "".join(client_lines),
-            parse_mode="HTML",
-        )
-    except Exception:
-        pass
 
-    # Ограничиваем размер set — храним не более 5000 ID
-    if len(processed_payments) > 5000:
-        to_remove = list(processed_payments)[:1000]
-        for pid in to_remove:
-            processed_payments.discard(pid)
+# ================== СТАТИСТИКА CHECKER'А ==================
+@dp.callback_query(F.data == "checker:stats")
+async def checker_stats(call: CallbackQuery):
+    checker = find_checker_for_user(
+        user_id=call.from_user.id,
+        username=call.from_user.username or "",
+    )
+    if not checker:
+        await call.answer("Вы не админ на входе", show_alert=True)
+        return
 
+    # Считаем по доступным событиям
+    accessible_events = get_checker_events(checker)
+    event_ids = {str(e["id"]) for e in accessible_events}
+
+    total = 0
+    used = 0
+    for code, t in tickets.items():
+        if str(t.get("event_id")) not in event_ids:
+            continue
+        total += 1
+        if t.get("used"):
+            used += 1
+
+    if checker.get("event_id") is None:
+        header = "🌐 <b>Все вечеринки</b>"
+    else:
+        ev = next((e for e in events if str(e["id"]) == str(checker.get("event_id"))), None)
+        header = f"🎯 <b>{ev['title'] if ev else 'Событие'}</b>"
+
+    text = (
+        f"📊 <b>Статистика входа</b>\n\n"
+        f"{header}\n\n"
+        f"🎫 Всего билетов: <b>{total}</b>\n"
+        f"✅ Погашено: <b>{used}</b>\n"
+        f"🟢 Осталось: <b>{total - used}</b>\n"
+    )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ В меню", callback_data="checker:menu")],
+    ])
+
+    await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
 
 # ================== АДМИН ==================
 @dp.message(Command("admin"))
@@ -1499,6 +1818,7 @@ async def show_admin_menu(message: Message, state: FSMContext):
         [InlineKeyboardButton(text="🗑 Удалить событие", callback_data="admin:delete")],
         [InlineKeyboardButton(text="📋 Список событий", callback_data="admin:list")],
         [InlineKeyboardButton(text="🎉 Анонсы (просмотр)", callback_data="show_events")],
+        [InlineKeyboardButton(text="🎫 Админы на входе", callback_data="admin:checkers")],
         [InlineKeyboardButton(text="👥 Пользователи", callback_data="admin:users:0")],
         [InlineKeyboardButton(text="🚫 Чёрный список", callback_data="admin:blacklist")],
         [InlineKeyboardButton(text="📊 Попытки регистрации", callback_data="admin:reg_attempts")],
@@ -1511,7 +1831,7 @@ async def show_admin_menu(message: Message, state: FSMContext):
     await message.answer(
         f"🛠 <b>Админ-панель</b>\n\n"
         f"Событий: {len(events)} | Заказов: {len(orders)} | Юзеров: {len(users)}\n"
-        f"ЧС: {len(blacklist)} | Попыток: {len(reg_attempts)}",
+        f"ЧС: {len(blacklist)} | Попыток: {len(reg_attempts)} | Checkers: {len(checkers)}",
         reply_markup=kb, parse_mode="HTML",
     )
     await state.set_state(Admin.menu)
@@ -1530,6 +1850,377 @@ async def admin_report(call: CallbackQuery):
     await call.message.answer("📤 Отчёт отправлен на email.")
 
 
+# ================== РАЗДЕЛ «АДМИНЫ НА ВХОДЕ» ==================
+@dp.callback_query(F.data == "admin:checkers")
+async def admin_checkers_menu(call: CallbackQuery, state: FSMContext):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("Только для главного админа", show_alert=True)
+        return
+
+    total = len(checkers)
+    all_events_cnt = sum(1 for c in checkers.values() if c.get("event_id") is None)
+    specific_cnt = total - all_events_cnt
+    active_cnt = sum(1 for c in checkers.values() if c.get("user_id"))
+
+    text = (
+        f"🎫 <b>Админы на входе</b>\n\n"
+        f"Всего: <b>{total}</b>\n"
+        f"🌐 На все вечеринки: <b>{all_events_cnt}</b>\n"
+        f"🎯 На конкретные: <b>{specific_cnt}</b>\n"
+        f"🟢 Активировано: <b>{active_cnt}</b>\n\n"
+        f"Что делаем?"
+    )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Добавить по @username", callback_data="admin:chk:add_username")],
+        [InlineKeyboardButton(text="➕ Добавить по телефону", callback_data="admin:chk:add_phone")],
+        [InlineKeyboardButton(text="📋 Список всех", callback_data="admin:chk:list")],
+        [InlineKeyboardButton(text="🗑 Удалить", callback_data="admin:chk:remove")],
+        [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin:back")],
+    ])
+
+    await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+
+
+@dp.callback_query(F.data == "admin:chk:add_username")
+async def admin_chk_add_username(call: CallbackQuery, state: FSMContext):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("Только для главного админа", show_alert=True)
+        return
+
+    await state.update_data(chk_type="username")
+    await call.message.edit_text(
+        "➕ <b>Добавление админа на входе</b>\n\n"
+        "Шаг 1/3. Отправьте <b>@username</b> (например, @kolya_vhod):\n\n"
+        "Для отмены — /admin",
+        parse_mode="HTML",
+    )
+    await state.set_state(Admin.checker_add_username)
+
+
+@dp.message(Admin.checker_add_username)
+async def admin_chk_save_username(message: Message, state: FSMContext):
+    if message.text == "/admin":
+        await state.clear()
+        await show_admin_menu(message, state)
+        return
+
+    value = message.text.strip()
+    if not value.startswith("@"):
+        value = "@" + value
+
+    if len(value) < 3:
+        await message.answer("❌ Слишком короткий username. Попробуйте ещё раз:")
+        return
+
+    # Проверяем, нет ли уже такого
+    value_clean = value.lstrip("@").lower()
+    for chk_id, c in checkers.items():
+        if c.get("username") == value_clean:
+            await message.answer(
+                f"⚠️ Checker с username {value} уже существует.",
+            )
+            await state.clear()
+            await show_admin_menu(message, state)
+            return
+
+    await state.update_data(chk_value=value)
+    await state.set_state(Admin.checker_add_name)
+    await message.answer(
+        "Шаг 2/3. Отправьте <b>имя</b> checker'а (для отображения):\n\n"
+        "Например: <code>Коля (вход)</code>\n\n"
+        "Или отправьте <code>-</code>, чтобы оставить пустым:",
+        parse_mode="HTML",
+    )
+
+
+@dp.callback_query(F.data == "admin:chk:add_phone")
+async def admin_chk_add_phone(call: CallbackQuery, state: FSMContext):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("Только для главного админа", show_alert=True)
+        return
+
+    await state.update_data(chk_type="phone")
+    await call.message.edit_text(
+        "➕ <b>Добавление админа на входе</b>\n\n"
+        "Шаг 1/3. Отправьте <b>номер телефона</b> (например, +79991234567):\n\n"
+        "Для отмены — /admin",
+        parse_mode="HTML",
+    )
+    await state.set_state(Admin.checker_add_phone)
+
+
+@dp.message(Admin.checker_add_phone)
+async def admin_chk_save_phone(message: Message, state: FSMContext):
+    if message.text == "/admin":
+        await state.clear()
+        await show_admin_menu(message, state)
+        return
+
+    value = message.text.strip()
+    value_clean = value.replace(" ", "").replace("-", "").replace("+", "")
+
+    if len(value_clean) < 10:
+        await message.answer("❌ Слишком короткий номер. Попробуйте ещё раз:")
+        return
+
+    # Проверяем дубли
+    for chk_id, c in checkers.items():
+        existing = (c.get("phone") or "").replace(" ", "").replace("-", "").replace("+", "")
+        if existing == value_clean:
+            await message.answer(
+                f"⚠️ Checker с телефоном {value} уже существует.",
+            )
+            await state.clear()
+            await show_admin_menu(message, state)
+            return
+
+    await state.update_data(chk_value=value)
+    await state.set_state(Admin.checker_add_name)
+    await message.answer(
+        "Шаг 2/3. Отправьте <b>имя</b> checker'а (для отображения):\n\n"
+        "Например: <code>Коля (вход)</code>\n\n"
+        "Или отправьте <code>-</code>, чтобы оставить пустым:",
+        parse_mode="HTML",
+    )
+
+
+@dp.message(Admin.checker_add_name)
+async def admin_chk_save_name(message: Message, state: FSMContext):
+    if message.text == "/admin":
+        await state.clear()
+        await show_admin_menu(message, state)
+        return
+
+    name = message.text.strip()
+    if name == "-":
+        name = ""
+
+    await state.update_data(chk_name=name)
+
+    # Шаг 3: выбор области доступа
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="🌐 Все вечеринки",
+            callback_data="admin:chk:access:all"
+        )],
+        [InlineKeyboardButton(
+            text="🎯 Конкретная вечеринка",
+            callback_data="admin:chk:access:specific"
+        )],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="admin:checkers")],
+    ])
+    await message.answer(
+        "Шаг 3/3. Выберите <b>область доступа</b>:",
+        reply_markup=kb, parse_mode="HTML",
+    )
+    await state.set_state(Admin.checker_choose_event)
+
+
+@dp.callback_query(F.data == "admin:chk:access:all")
+async def admin_chk_access_all(call: CallbackQuery, state: FSMContext):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("Только для главного админа", show_alert=True)
+        return
+
+    data = await state.get_data()
+    await finish_add_checker(call, state, event_id=None, data=data)
+
+
+@dp.callback_query(F.data == "admin:chk:access:specific")
+async def admin_chk_access_specific(call: CallbackQuery, state: FSMContext):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("Только для главного админа", show_alert=True)
+        return
+
+    if not events:
+        await call.answer("Нет событий. Сначала создайте событие.", show_alert=True)
+        return
+
+    buttons = []
+    for e in events:
+        buttons.append([InlineKeyboardButton(
+            text=f"🎉 {e['title']} — {e['date_text']}",
+            callback_data=f"admin:chk:ev:{e['id']}"
+        )])
+    buttons.append([InlineKeyboardButton(text="❌ Отмена", callback_data="admin:checkers")])
+
+    await call.message.edit_text(
+        "🎯 Выберите <b>событие</b>, к которому даёте доступ:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+        parse_mode="HTML",
+    )
+
+
+@dp.callback_query(F.data.startswith("admin:chk:ev:"))
+async def admin_chk_choose_event(call: CallbackQuery, state: FSMContext):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("Только для главного админа", show_alert=True)
+        return
+
+    event_id = call.data.split(":", 3)[3]
+    data = await state.get_data()
+    await finish_add_checker(call, state, event_id=event_id, data=data)
+
+
+async def finish_add_checker(call: CallbackQuery, state: FSMContext, event_id: Optional[str], data: dict):
+    """Завершает добавление checker'а."""
+    chk_type = data.get("chk_type", "username")
+    chk_value = data.get("chk_value", "")
+    chk_name = data.get("chk_name", "")
+
+    if not chk_value:
+        await call.answer("Ошибка: нет значения", show_alert=True)
+        await state.clear()
+        return
+
+    # Генерируем внутренний ID
+    chk_id = f"chk_{uuid.uuid4().hex[:8]}"
+
+    new_checker = {
+        "id": chk_id,
+        "user_id": None,
+        "username": chk_value.lstrip("@").lower() if chk_type == "username" else "",
+        "phone": chk_value if chk_type == "phone" else "",
+        "name": chk_name,
+        "event_id": event_id,
+        "added_by": ADMIN_ID,
+        "added_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "active": True,
+    }
+
+    checkers[chk_id] = new_checker
+    save_data()
+
+    # Формируем ответ
+    if event_id is None:
+        access_text = "🌐 Все вечеринки"
+    else:
+        ev = next((e for e in events if str(e["id"]) == str(event_id)), None)
+        access_text = f"🎯 {ev['title']} — {ev['date_text']}" if ev else f"🎯 Событие {event_id}"
+
+    if chk_type == "username":
+        value_text = f"🔗 @{new_checker['username']}"
+    else:
+        value_text = f"📱 {new_checker['phone']}"
+
+    name_text = new_checker['name'] or "—"
+
+    await state.clear()
+
+    await call.message.edit_text(
+        f"✅ <b>Админ на входе добавлен!</b>\n\n"
+        f"👤 {name_text}\n"
+        f"{value_text}\n"
+        f"Область: {access_text}\n\n"
+        f"<i>Он активируется, когда напишет /start боту "
+        f"или поделится контактом (если добавлен по телефону).</i>",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="⬅️ К списку админов", callback_data="admin:checkers")
+        ]]),
+    )
+
+
+@dp.callback_query(F.data == "admin:chk:list")
+async def admin_chk_list(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("Только для главного админа", show_alert=True)
+        return
+
+    if not checkers:
+        await call.message.edit_text(
+            "📭 Нет админов на входе.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="⬅️ Назад", callback_data="admin:checkers")
+            ]]),
+        )
+        return
+
+    text = f"📋 <b>Админы на входе</b> ({len(checkers)})\n\n"
+    for chk_id, c in checkers.items():
+        if c.get("user_id"):
+            status_icon = "🟢"
+        else:
+            status_icon = "🟡"
+
+        name = c.get("name") or "—"
+        if c.get("username"):
+            value = f"🔗 @{c['username']}"
+        elif c.get("phone"):
+            value = f"📱 {c['phone']}"
+        else:
+            value = "—"
+
+        if c.get("event_id") is None:
+            access = "🌐 Все вечеринки"
+        else:
+            ev = next((e for e in events if str(e["id"]) == str(c["event_id"])), None)
+            access = f"🎯 {ev['title']}" if ev else f"🎯 {c['event_id']}"
+
+        text += (
+            f"{status_icon} <b>{name}</b>\n"
+            f"   {value}\n"
+            f"   {access}\n\n"
+        )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin:checkers")],
+    ])
+    await call.message.edit_text(text[:4000], reply_markup=kb, parse_mode="HTML")
+
+
+@dp.callback_query(F.data == "admin:chk:remove")
+async def admin_chk_remove_start(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("Только для главного админа", show_alert=True)
+        return
+
+    if not checkers:
+        await call.answer("Список пуст", show_alert=True)
+        return
+
+    buttons = []
+    for chk_id, c in checkers.items():
+        name = c.get("name") or "—"
+        if c.get("username"):
+            value = f"@{c['username']}"
+        elif c.get("phone"):
+            value = c["phone"]
+        else:
+            value = "—"
+        buttons.append([InlineKeyboardButton(
+            text=f"🗑 {name} — {value}",
+            callback_data=f"admin:chk:del:{chk_id}"
+        )])
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="admin:checkers")])
+
+    await call.message.edit_text(
+        "🗑 Выберите админа для удаления:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+    )
+
+
+@dp.callback_query(F.data.startswith("admin:chk:del:"))
+async def admin_chk_remove_confirm(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("Только для главного админа", show_alert=True)
+        return
+
+    chk_id = call.data.split(":", 3)[3]
+    if chk_id not in checkers:
+        await call.answer("Не найден", show_alert=True)
+        return
+
+    removed = checkers.pop(chk_id)
+    save_data()
+
+    name = removed.get("name") or "—"
+    await call.answer(f"Удалён: {name}")
+    await admin_checkers_menu(call, None)
+
+
+# ================== СОЗДАНИЕ СОБЫТИЙ ==================
 @dp.callback_query(F.data == "admin:add")
 async def admin_add_start(call: CallbackQuery, state: FSMContext):
     await state.clear()
@@ -1661,6 +2352,7 @@ async def finish_add_event(message: Message, state: FSMContext):
     await state.clear()
     await message.answer(f"✅ Событие «{data['title']}» добавлено!")
 
+
 @dp.callback_query(F.data == "admin:list")
 async def admin_list(call: CallbackQuery):
     if not events:
@@ -1727,6 +2419,7 @@ async def admin_stats(call: CallbackQuery):
         f"✅ Билетов использовано: <b>{tickets_used}</b>\n"
         f"🚫 В ЧС: <b>{len(blacklist)}</b>\n"
         f"📊 Попыток рег.: <b>{len(reg_attempts)}</b>\n"
+        f"🎫 Checkers: <b>{len(checkers)}</b>\n"
     )
 
     if by_event:
@@ -2159,6 +2852,7 @@ async def admin_use_ticket(call: CallbackQuery):
         parse_mode="HTML",
     )
 
+
 # ================== ВСЕ БИЛЕТЫ (АДМИН) ==================
 TICKETS_PER_PAGE = 5
 
@@ -2184,13 +2878,7 @@ def _ticket_price(t: dict) -> int:
 
 
 def _ticket_holder_info(t: dict) -> str:
-    """
-    Возвращает многострочную строку с данными владельца билета:
-    👤 Имя Фамилия (id: XXX)
-    📱 телефон
-    🔗 @username
-    Если юзер не найден — только holder + user_id.
-    """
+    """Многострочная строка с данными владельца."""
     uid = t.get("user_id")
     holder = t.get("holder", "—")
 
@@ -2222,11 +2910,7 @@ def _ticket_holder_info(t: dict) -> str:
 
 
 def _ticket_csv_row(code: str, t: dict) -> list:
-    """
-    Возвращает строку для CSV:
-    Имя | Фамилия | Телефон | Telegram | Код | Тип |
-    Событие | Дата события | Дата покупки | Статус | Сумма
-    """
+    """Строка для CSV."""
     uid = t.get("user_id")
     user = None
     try:
@@ -2249,7 +2933,6 @@ def _ticket_csv_row(code: str, t: dict) -> list:
         phone = ""
         tg = ""
 
-    # Сумма — из билета или из заказа
     price = _ticket_price(t)
     if price == 0:
         for o in orders:
@@ -2285,7 +2968,7 @@ def _ticket_csv_headers() -> list:
 
 
 def build_all_tickets_page(page: int, event_id: Optional[str] = None):
-    """Строит страницу со списком билетов. event_id=None → все события."""
+    """Строит страницу со списком билетов."""
     if event_id:
         items = [(code, t) for code, t in tickets.items()
                  if str(t.get("event_id")) == str(event_id)]
@@ -2540,13 +3223,484 @@ async def admin_tickets_csv(call: CallbackQuery):
     )
     await call.answer("Отправляю CSV...")
 
+# ================== МЕРОПРИЯТИЯ (КЛИЕНТ) ==================
+@dp.callback_query(F.data == "show_events")
+async def show_events(call: CallbackQuery):
+    now = datetime.now()
+    upcoming = [
+        e for e in events
+        if e.get("active", True) and datetime.fromisoformat(e["start_dt"]) > now
+    ]
+
+    if not upcoming:
+        await call.message.answer("😔 Пока нет доступных событий.")
+        return
+
+    buttons = []
+    for e in upcoming:
+        buttons.append([InlineKeyboardButton(
+            text=f"💃 {e['title']} — {e['date_text']}",
+            callback_data=f"event:{e['id']}"
+        )])
+
+    await call.message.answer(
+        "🎉 <b>Выберите мероприятие:</b>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+        parse_mode="HTML",
+    )
+
+
+# ================== МОИ БИЛЕТЫ (КЛИЕНТ) ==================
+@dp.callback_query(F.data == "my_tickets")
+async def my_tickets(call: CallbackQuery):
+    """Показывает все билеты текущего пользователя."""
+    user_id = call.from_user.id
+
+    user_tickets = [
+        (code, t) for code, t in tickets.items()
+        if str(t.get("user_id")) == str(user_id)
+    ]
+
+    if not user_tickets:
+        await call.message.answer(
+            "🎟 <b>Мои билеты</b>\n\n"
+            "📭 У вас пока нет билетов.\n\n"
+            "Нажмите «🎉 Мероприятия» чтобы купить.",
+            parse_mode="HTML",
+        )
+        return
+
+    user_tickets.sort(
+        key=lambda kv: (kv[1].get("used", False), kv[1].get("event_date", "")),
+    )
+
+    active_cnt = sum(1 for _, t in user_tickets if not t.get("used"))
+    used_cnt = len(user_tickets) - active_cnt
+
+    text = (
+        f"🎟 <b>Мои билеты</b>\n\n"
+        f"Всего: <b>{len(user_tickets)}</b>\n"
+        f"🟢 Активных: <b>{active_cnt}</b>\n"
+        f"✅ Использовано: <b>{used_cnt}</b>\n\n"
+    )
+
+    buttons = []
+    for code, t in user_tickets:
+        status = "✅" if t.get("used") else "🟢"
+        type_label = "Парный" if t.get("type") == "pair" else "Обычный"
+        event_title = t.get("event_title", "—")
+        event_date = t.get("event_date", "—")
+
+        text += (
+            f"{status} <code>{code}</code>\n"
+            f"   🎉 {event_title}\n"
+            f"   📅 {event_date}\n"
+            f"   🎫 {type_label}\n\n"
+        )
+
+        if not t.get("used"):
+            buttons.append([InlineKeyboardButton(
+                text=f"📱 Показать QR — {code[-8:]}",
+                callback_data=f"my_ticket:{code}"
+            )])
+
+    buttons.append([InlineKeyboardButton(
+        text="🎉 Мероприятия", callback_data="show_events"
+    )])
+
+    await call.message.answer(
+        text,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+        parse_mode="HTML",
+    )
+
+
+@dp.callback_query(F.data.startswith("my_ticket:"))
+async def show_my_ticket_qr(call: CallbackQuery):
+    """Показывает QR-код конкретного билета."""
+    code = call.data.split(":", 1)[1]
+    user_id = call.from_user.id
+
+    ticket = tickets.get(code)
+    if not ticket:
+        await call.answer("Билет не найден", show_alert=True)
+        return
+
+    if str(ticket.get("user_id")) != str(user_id):
+        await call.answer("Это не ваш билет", show_alert=True)
+        return
+
+    if ticket.get("used"):
+        await call.answer("Этот билет уже использован", show_alert=True)
+        return
+
+    event = next(
+        (e for e in events if str(e["id"]) == str(ticket.get("event_id"))),
+        None
+    )
+
+    qr_file = make_qr_image(code)
+    type_label = "Парный" if ticket.get("type") == "pair" else "Обычный"
+
+    caption = (
+        f"🎫 <b>Ваш билет</b>\n\n"
+        f"👤 {ticket.get('holder', '—')}\n"
+        f"🎟 {type_label}\n"
+        f"🎉 {ticket.get('event_title', '—')}\n"
+        f"📅 {ticket.get('event_date', '—')}\n"
+    )
+    if event and event.get("place"):
+        caption += f"📍 {event.get('place')}\n"
+    caption += (
+        f"\nКод: <code>{code}</code>\n\n"
+        "Покажите QR на входе."
+    )
+
+    await call.message.answer_photo(
+        qr_file,
+        caption=caption,
+        parse_mode="HTML",
+    )
+    await call.answer()
+
+
+@dp.callback_query(F.data.startswith("event:"))
+async def event_selected(call: CallbackQuery, state: FSMContext):
+    eid = call.data.split(":")[1]
+    event = next((e for e in events if e["id"] == eid), None)
+    if not event:
+        await call.answer("Событие не найдено")
+        return
+
+    is_admin = (call.from_user.id == ADMIN_ID)
+
+    if not is_admin and call.from_user.id not in users:
+        await call.answer("Сначала пройдите регистрацию 📝", show_alert=True)
+        return
+
+    if sales_closed(event):
+        await call.answer("❌ Продажа билетов закрыта", show_alert=True)
+        return
+
+    await state.update_data(event_id=eid, event=event)
+
+    if is_admin:
+        buttons = [[InlineKeyboardButton(
+            text="🔙 Закрыть",
+            callback_data="admin:back"
+        )]]
+    else:
+        buttons = [[InlineKeyboardButton(
+            text=f"🎫 Обычный — {event['price_single']} ₽",
+            callback_data="ticket:single"
+        )]]
+        if event.get("price_pair", 0) > 0:
+            buttons.append([InlineKeyboardButton(
+                text=f"💑 Парный — {event['price_pair']} ₽",
+                callback_data="ticket:pair"
+            )])
+
+    caption = (
+        f"🎉 <b>{event['title']}</b>\n\n"
+        f"📅 {event['date_text']}\n"
+        f"📍 {event['place']}\n\n"
+        f"{event['description']}\n\n"
+    )
+    if is_admin:
+        caption += "👁 <i>Режим просмотра (админ)</i>"
+    else:
+        caption += "Выберите тип билета:"
+
+    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+
+    if event.get("photo_id"):
+        await call.message.answer_photo(
+            event["photo_id"], caption=caption,
+            reply_markup=kb, parse_mode="HTML"
+        )
+    else:
+        await call.message.answer(caption, reply_markup=kb, parse_mode="HTML")
+
+    await state.set_state(Reg.ticket_type)
+
+
+# ================== ОПЛАТА ЧЕРЕЗ ЮKASSA ==================
+@dp.callback_query(F.data == "ticket:single", Reg.ticket_type)
+async def ticket_single(call: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    event = data.get("event")
+    if not event:
+        await call.answer("Ошибка")
+        return
+    await state.update_data(ticket_type="single", price=event["price_single"])
+    await go_to_payment(call.message, state)
+
+
+@dp.callback_query(F.data == "ticket:pair", Reg.ticket_type)
+async def ticket_pair(call: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    event = data.get("event")
+    if not event or event.get("price_pair", 0) <= 0:
+        await call.answer("Парные недоступны")
+        return
+    await state.update_data(ticket_type="pair", price=event["price_pair"])
+    await call.message.edit_text(
+        "💑 Введите <b>@username</b> второго участника:",
+        parse_mode="HTML",
+    )
+    await state.set_state(Reg.partner_input)
+
+
+@dp.message(Reg.partner_input)
+async def partner_input(message: Message, state: FSMContext):
+    text = message.text.strip()
+    if not text.startswith("@") or len(text) < 3:
+        await message.answer("❌ Формат: <b>@username</b>", parse_mode="HTML")
+        return
+
+    partner_id = username_index.get(text.lower())
+    if partner_id == message.from_user.id:
+        await message.answer("❌ Нельзя себя.")
+        return
+
+    if partner_id and partner_id in users:
+        await state.update_data(partner_id=partner_id)
+        partner = users[partner_id]
+        await message.answer(
+            f"✅ Найден: {partner['name']} {partner['surname']}",
+        )
+        await go_to_payment(message, state)
+    else:
+        invite_link = f"https://t.me/{BOT_USERNAME}?start=invite_{message.from_user.id}"
+        await message.answer(
+            f"❌ Не найден. Отправьте ссылку:\n<code>{invite_link}</code>\n\n"
+            "После регистрации напишите /start заново.",
+            parse_mode="HTML",
+        )
+
+
+async def go_to_payment(message: Message, state: FSMContext):
+    """Создаёт платёж в ЮKassa и отправляет пользователю ссылку."""
+    data = await state.get_data()
+    price = data.get("price", 0)
+    ticket_type = data.get("ticket_type", "single")
+    event = data.get("event", {})
+    user_id = message.chat.id
+
+    ticket_label = "Парный" if ticket_type == "pair" else "Обычный"
+    description = f"{event.get('title', 'Билет')} — {ticket_label} билет"
+
+    payment = create_yookassa_payment(
+        amount=price,
+        description=description,
+        user_id=user_id,
+        metadata={
+            "event_id": data.get("event_id", ""),
+            "ticket_type": ticket_type,
+            "price": str(price),
+        },
+    )
+
+    if not payment:
+        await message.answer(
+            "❌ Ошибка при создании платежа. Попробуйте позже или напишите в поддержку."
+        )
+        return
+
+    payment_id = payment["payment_id"]
+    confirmation_url = payment["confirmation_url"]
+
+    pending_payments[payment_id] = {
+        "user_id": user_id,
+        "event_id": data.get("event_id", ""),
+        "event_title": event.get("title", ""),
+        "ticket_type": ticket_type,
+        "price": price,
+        "partner_id": data.get("partner_id"),
+        "name": f"{data.get('name', '')} {data.get('surname', '')}".strip(),
+        "phone": data.get("phone", ""),
+        "email": data.get("email", ""),
+    }
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"💳 Оплатить {price} ₽", url=confirmation_url)],
+        [InlineKeyboardButton(text="🆘 Техподдержка", url=f"https://t.me/{settings.get('support', '@your_support').lstrip('@')}")],
+        [InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_order")],
+    ])
+
+    await message.answer(
+        f"💳 <b>Билет: {ticket_label} — {price} ₽</b>\n\n"
+        f"🎉 {event.get('title', '')}\n"
+        f"📅 {event.get('date_text', '')}\n\n"
+        "1. Нажмите «Оплатить» — откроется страница ЮKassa.\n"
+        "2. Оплатите картой, СБП или другим способом.\n"
+        "3. После оплаты билет придёт автоматически в течение 1 минуты.\n\n"
+        "⏱ Страница оплаты активна 60 минут.",
+        reply_markup=kb, parse_mode="HTML",
+    )
+    await state.set_state(Reg.payment)
+
+
+@dp.callback_query(F.data == "cancel_order")
+async def cancel_order(call: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await call.message.edit_text("❌ Отменено. /start — заново.")
+
+
+# ================== ВЫДАЧА БИЛЕТА ==================
+async def issue_ticket(user_id: int, code: str, ticket_type: str, holder_name: str, event: dict):
+    tickets[code] = {
+        "user_id": user_id,
+        "type": ticket_type,
+        "holder": holder_name,
+        "used": False,
+        "event_id": event.get("id", ""),
+        "event_title": event.get("title", ""),
+        "event_date": event.get("date_text", ""),
+        "issued_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+    }
+    save_data()
+
+    qr_file = make_qr_image(code)
+    type_label = "Парный" if ticket_type == "pair" else "Обычный"
+
+    holder_user = users.get(user_id, {})
+    holder_username = holder_user.get("username") or ""
+
+    caption = (
+        f"🎫 <b>Ваш билет на {event.get('title', 'Vida Bachata')}</b>\n\n"
+        f"👤 {holder_name}\n"
+    )
+    if holder_username:
+        caption += f"🔗 @{holder_username}\n"
+    caption += (
+        f"🎟 {type_label}\n"
+        f"📅 {event.get('date_text', '')}\n"
+        f"📍 {event.get('place', '')}\n\n"
+        f"Код: <code>{code}</code>\n\n"
+        "Покажите QR на входе."
+    )
+
+    try:
+        await bot.send_photo(user_id, qr_file, caption=caption, parse_mode="HTML")
+    except Exception as e:
+        print(f"[TICKET] Ошибка отправки билета user={user_id}: {e}")
+
+
+async def process_successful_payment(payment_id: str):
+    """Обрабатывает успешную оплату с защитой от двойной обработки."""
+    if payment_id in processed_payments:
+        print(f"[YOOKASSA] ⚠️ Платёж {payment_id} уже был обработан — пропускаем")
+        return
+
+    pending = pending_payments.pop(payment_id, None)
+    if not pending:
+        print(f"[YOOKASSA] payment_id={payment_id} не найден в pending")
+        processed_payments.add(payment_id)
+        return
+
+    processed_payments.add(payment_id)
+    print(f"[YOOKASSA] ✅ Платёж {payment_id} принят в обработку")
+
+    user_id = pending["user_id"]
+    event = next((e for e in events if e["id"] == pending["event_id"]), None)
+    if not event:
+        print(f"[YOOKASSA] Событие {pending['event_id']} не найдено")
+        return
+
+    ticket_type = pending["ticket_type"]
+    buyer_name = pending["name"] or "Клиент"
+
+    order = {
+        "order_id": next_order_id(),
+        "user_id": user_id,
+        "event_id": pending["event_id"],
+        "event_title": event.get("title", ""),
+        "email": pending.get("email", ""),
+        "name": buyer_name,
+        "ticket_type": ticket_type,
+        "price": pending["price"],
+        "paid_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+    }
+    orders.append(order)
+    save_data()
+
+    buyer_code = generate_ticket_code()
+    await issue_ticket(user_id, buyer_code, ticket_type, buyer_name, event)
+
+    if ticket_type == "pair" and pending.get("partner_id"):
+        partner_id = pending["partner_id"]
+        if partner_id in users:
+            partner = users[partner_id]
+            partner_name = f"{partner['name']} {partner['surname']}"
+            await issue_ticket(
+                partner_id, generate_ticket_code(),
+                ticket_type, partner_name, event
+            )
+
+    buyer_user = users.get(user_id, {})
+    buyer_full_name = " ".join(filter(None, [
+        (buyer_user.get("name") or "").strip(),
+        (buyer_user.get("surname") or "").strip(),
+    ])).strip()
+    if not buyer_full_name:
+        buyer_full_name = buyer_name
+
+    buyer_username = buyer_user.get("username") or ""
+    buyer_phone = buyer_user.get("phone") or pending.get("phone", "") or "—"
+    ticket_type_label = "Парный" if ticket_type == "pair" else "Обычный"
+
+    # Уведомление админу
+    admin_lines = [
+        f"💰 <b>Оплата получена!</b>\n",
+        f"💳 Платёж: <code>{payment_id}</code>\n",
+        f"🎉 {event.get('title', '')}\n",
+        f"📅 {event.get('date_text', '')}\n",
+        "\n",
+        f"👤 <b>{buyer_full_name}</b>\n",
+        f"🆔 <code>{user_id}</code>\n",
+    ]
+    if buyer_username:
+        admin_lines.append(f"🔗 @{buyer_username}\n")
+    admin_lines.append(f"📱 {buyer_phone}\n")
+    admin_lines.append("\n")
+    admin_lines.append(f"🎫 {ticket_type_label} | {pending['price']} ₽\n")
+
+    try:
+        await bot.send_message(ADMIN_ID, "".join(admin_lines), parse_mode="HTML")
+    except Exception:
+        pass
+
+    # Уведомление клиенту
+    client_lines = [
+        "✅ <b>Оплата прошла!</b>\n\n",
+        f"👤 {buyer_full_name}\n",
+        f"🎉 {event.get('title', '')}\n",
+        f"📅 {event.get('date_text', '')}\n",
+    ]
+    if event.get("place"):
+        client_lines.append(f"📍 {event.get('place')}\n")
+    client_lines.append(f"🎫 {ticket_type_label} | {pending['price']} ₽\n\n")
+    client_lines.append("🎟 Билет отправлен выше ☝️\n")
+    client_lines.append("Покажите QR-код на входе.")
+
+    try:
+        await bot.send_message(user_id, "".join(client_lines), parse_mode="HTML")
+    except Exception:
+        pass
+
+    if len(processed_payments) > 5000:
+        to_remove = list(processed_payments)[:1000]
+        for pid in to_remove:
+            processed_payments.discard(pid)
+
 
 # ================== КОСТЫЛЬ ДЛЯ RENDER ==================
 _main_loop = None
 
 
 def start_keepalive_server():
-    """HTTP-сервер на порту + обработка webhook ЮKassa."""
+    """HTTP-сервер на порту + webhook ЮKassa."""
     PORT = int(os.getenv("PORT", "10000"))
 
     class MainHandler(http.server.BaseHTTPRequestHandler):
@@ -2568,7 +3722,6 @@ def start_keepalive_server():
                     payment_id = obj.get("id", "")
                     status = obj.get("status", "")
 
-                    # Логируем IP для диагностики (может быть в X-Forwarded-For)
                     client_ip = self.client_address[0]
                     forwarded = self.headers.get("X-Forwarded-For", "")
                     print(
@@ -2578,7 +3731,6 @@ def start_keepalive_server():
 
                     if event == "payment.succeeded" and status == "succeeded":
                         if _main_loop:
-                            # ВАЛИДАЦИЯ через API ЮKassa (защита от подделки)
                             asyncio.run_coroutine_threadsafe(
                                 verify_and_process(payment_id),
                                 _main_loop
@@ -2609,16 +3761,11 @@ def start_keepalive_server():
 
 
 async def verify_and_process(payment_id: str):
-    """
-    Проверяет платёж через API ЮKassa и обрабатывает если реальный.
-    Защита от поддельных webhook.
-    """
-    # Если уже обработан — не тратим запрос к API
+    """Проверяет платёж через API ЮKassa и обрабатывает если реальный."""
     if payment_id in processed_payments:
         print(f"[YOOKASSA] ⚠️ Платёж {payment_id} уже обработан (до верификации)")
         return
 
-    # Верификация через API (синхронный вызов в отдельном потоке)
     is_real = await asyncio.to_thread(verify_payment_with_yookassa, payment_id)
 
     if not is_real:

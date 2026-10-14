@@ -6,3 +6,5 @@ resend
 dateparser
 supabase
 yookassa
+requests
+Pillow

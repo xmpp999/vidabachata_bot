@@ -81,6 +81,7 @@ events = []
 blacklist = {}
 reg_attempts = []
 pending_payments = {}
+processed_payments = set()  # ID платежей, которые уже обработаны (защита от двойной оплаты)
 
 settings = {
     "support": os.getenv("SUPPORT", "@your_support"),
@@ -233,6 +234,36 @@ def create_yookassa_payment(amount: int, description: str, user_id: int, metadat
     except Exception as e:
         print(f"[YOOKASSA] Ошибка создания платежа: {e}")
         return {}
+
+
+def verify_payment_with_yookassa(payment_id: str) -> bool:
+    """
+    Проверяет платёж через API ЮKassa.
+    Возвращает True только если платёж реально существует и succeeded.
+    Защита от поддельных webhook-запросов.
+    """
+    try:
+        payment = Payment.find_one(payment_id)
+        if not payment:
+            print(f"[YOOKASSA] Платёж {payment_id} не найден в API")
+            return False
+
+        if payment.status != "succeeded":
+            print(f"[YOOKASSA] Платёж {payment_id} имеет статус {payment.status}, не succeeded")
+            return False
+
+        # Дополнительно: проверяем что платёж от нашего магазина
+        try:
+            if str(payment.amount.value) and payment.amount.currency != "RUB":
+                print(f"[YOOKASSA] Платёж {payment_id} не в рублях")
+                return False
+        except Exception:
+            pass
+
+        return True
+    except Exception as e:
+        print(f"[YOOKASSA] Ошибка верификации платежа {payment_id}: {e}")
+        return False
 
 
 # ================== ЧЁРНЫЙ СПИСОК ==================
@@ -579,7 +610,6 @@ async def send_report_to_admin():
     except Exception as e:
         print(f"[EMAIL] Ошибка: {e}")
 
-
 # ================== СОСТОЯНИЯ ==================
 class Reg(StatesGroup):
     phone = State()
@@ -682,6 +712,7 @@ async def start(message: Message, state: FSMContext):
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🛠 Админ-панель", callback_data="admin:back")],
             [InlineKeyboardButton(text="🎉 Мероприятия", callback_data="show_events")],
+            [InlineKeyboardButton(text="🎟 Мои билеты", callback_data="my_tickets")],
             [InlineKeyboardButton(text="ВК", url="https://vk.com/vidabachata"),
              InlineKeyboardButton(text="Telegram", url="https://t.me/+eTMoEG6V1883Nzli")],
         ])
@@ -713,6 +744,7 @@ async def start(message: Message, state: FSMContext):
         )
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🎉 Мероприятия", callback_data="show_events")],
+            [InlineKeyboardButton(text="🎟 Мои билеты", callback_data="my_tickets")],
             [InlineKeyboardButton(text="ВК", url="https://vk.com/vidabachata"),
              InlineKeyboardButton(text="Telegram", url="https://t.me/+eTMoEG6V1883Nzli")],
         ])
@@ -759,6 +791,7 @@ async def start_registration(call: CallbackQuery, state: FSMContext):
     if call.from_user.id in users:
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🎉 Мероприятия", callback_data="show_events")],
+            [InlineKeyboardButton(text="🎟 Мои билеты", callback_data="my_tickets")],
         ])
         await call.message.answer(
             "✅ Вы уже зарегистрированы!\n\nНажмите «Мероприятия».",
@@ -939,6 +972,7 @@ async def confirm_yes(call: CallbackQuery, state: FSMContext):
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🎉 Мероприятия", callback_data="show_events")],
+        [InlineKeyboardButton(text="🎟 Мои билеты", callback_data="my_tickets")],
     ])
     await call.message.edit_text(
         "✅ Регистрация завершена!\n\nНажмите «Мероприятия».",
@@ -988,6 +1022,121 @@ async def show_events(call: CallbackQuery):
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
         parse_mode="HTML",
     )
+
+
+# ================== МОИ БИЛЕТЫ (КЛИЕНТ) ==================
+@dp.callback_query(F.data == "my_tickets")
+async def my_tickets(call: CallbackQuery):
+    """Показывает все билеты текущего пользователя."""
+    user_id = call.from_user.id
+
+    user_tickets = [
+        (code, t) for code, t in tickets.items()
+        if str(t.get("user_id")) == str(user_id)
+    ]
+
+    if not user_tickets:
+        await call.message.answer(
+            "🎟 <b>Мои билеты</b>\n\n"
+            "📭 У вас пока нет билетов.\n\n"
+            "Нажмите «🎉 Мероприятия» чтобы купить.",
+            parse_mode="HTML",
+        )
+        return
+
+    # Сортируем: сначала активные, потом по дате события
+    user_tickets.sort(
+        key=lambda kv: (kv[1].get("used", False), kv[1].get("event_date", "")),
+    )
+
+    active_cnt = sum(1 for _, t in user_tickets if not t.get("used"))
+    used_cnt = len(user_tickets) - active_cnt
+
+    text = (
+        f"🎟 <b>Мои билеты</b>\n\n"
+        f"Всего: <b>{len(user_tickets)}</b>\n"
+        f"🟢 Активных: <b>{active_cnt}</b>\n"
+        f"✅ Использовано: <b>{used_cnt}</b>\n\n"
+    )
+
+    buttons = []
+    for code, t in user_tickets:
+        status = "✅" if t.get("used") else "🟢"
+        type_label = "Парный" if t.get("type") == "pair" else "Обычный"
+        event_title = t.get("event_title", "—")
+        event_date = t.get("event_date", "—")
+
+        text += (
+            f"{status} <code>{code}</code>\n"
+            f"   🎉 {event_title}\n"
+            f"   📅 {event_date}\n"
+            f"   🎫 {type_label}\n\n"
+        )
+
+        if not t.get("used"):
+            buttons.append([InlineKeyboardButton(
+                text=f"📱 Показать QR — {code[-8:]}",
+                callback_data=f"my_ticket:{code}"
+            )])
+
+    buttons.append([InlineKeyboardButton(
+        text="🎉 Мероприятия", callback_data="show_events"
+    )])
+
+    await call.message.answer(
+        text,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+        parse_mode="HTML",
+    )
+
+
+@dp.callback_query(F.data.startswith("my_ticket:"))
+async def show_my_ticket_qr(call: CallbackQuery):
+    """Показывает QR-код конкретного билета."""
+    code = call.data.split(":", 1)[1]
+    user_id = call.from_user.id
+
+    ticket = tickets.get(code)
+    if not ticket:
+        await call.answer("Билет не найден", show_alert=True)
+        return
+
+    if str(ticket.get("user_id")) != str(user_id):
+        await call.answer("Это не ваш билет", show_alert=True)
+        return
+
+    if ticket.get("used"):
+        await call.answer("Этот билет уже использован", show_alert=True)
+        return
+
+    event = next(
+        (e for e in events if str(e["id"]) == str(ticket.get("event_id"))),
+        None
+    )
+
+    qr_file = make_qr_image(code)
+    type_label = "Парный" if ticket.get("type") == "pair" else "Обычный"
+
+    caption = (
+        f"🎫 <b>Ваш билет</b>\n\n"
+        f"👤 {ticket.get('holder', '—')}\n"
+        f"🎟 {type_label}\n"
+        f"🎉 {ticket.get('event_title', '—')}\n"
+        f"📅 {ticket.get('event_date', '—')}\n"
+    )
+    if event and event.get("place"):
+        caption += f"📍 {event.get('place')}\n"
+    caption += (
+        f"\nКод: <code>{code}</code>\n\n"
+        "Покажите QR на входе."
+    )
+
+    await call.message.answer_photo(
+        qr_file,
+        caption=caption,
+        parse_mode="HTML",
+    )
+    await call.answer()
 
 
 @dp.callback_query(F.data.startswith("event:"))
@@ -1190,7 +1339,6 @@ async def issue_ticket(user_id: int, code: str, ticket_type: str, holder_name: s
     qr_file = make_qr_image(code)
     type_label = "Парный" if ticket_type == "pair" else "Обычный"
 
-    # @username владельца
     holder_user = users.get(user_id, {})
     holder_username = holder_user.get("username") or ""
 
@@ -1215,11 +1363,22 @@ async def issue_ticket(user_id: int, code: str, ticket_type: str, holder_name: s
 
 
 async def process_successful_payment(payment_id: str):
-    """Обрабатывает успешную оплату."""
+    """Обрабатывает успешную оплату с защитой от двойной обработки."""
+    # ============ ЗАЩИТА ОТ ДВОЙНОЙ ОПЛАТЫ ============
+    if payment_id in processed_payments:
+        print(f"[YOOKASSA] ⚠️ Платёж {payment_id} уже был обработан — пропускаем")
+        return
+
     pending = pending_payments.pop(payment_id, None)
     if not pending:
         print(f"[YOOKASSA] payment_id={payment_id} не найден в pending")
+        # Помечаем, чтобы webhook не спамил
+        processed_payments.add(payment_id)
         return
+
+    # Помечаем ДО выдачи билета — защита от параллельных webhook
+    processed_payments.add(payment_id)
+    print(f"[YOOKASSA] ✅ Платёж {payment_id} принят в обработку")
 
     user_id = pending["user_id"]
     event = next((e for e in events if e["id"] == pending["event_id"]), None)
@@ -1264,7 +1423,7 @@ async def process_successful_payment(payment_id: str):
         (buyer_user.get("surname") or "").strip(),
     ])).strip()
     if not buyer_full_name:
-        buyer_full_name = buyer_name  # fallback на "Клиент"
+        buyer_full_name = buyer_name
 
     buyer_username = buyer_user.get("username") or ""
     buyer_phone = buyer_user.get("phone") or pending.get("phone", "") or "—"
@@ -1316,6 +1475,13 @@ async def process_successful_payment(payment_id: str):
         )
     except Exception:
         pass
+
+    # Ограничиваем размер set — храним не более 5000 ID
+    if len(processed_payments) > 5000:
+        to_remove = list(processed_payments)[:1000]
+        for pid in to_remove:
+            processed_payments.discard(pid)
+
 
 # ================== АДМИН ==================
 @dp.message(Command("admin"))
@@ -2155,7 +2321,6 @@ def build_all_tickets_page(page: int, event_id: Optional[str] = None):
     active_cnt = sum(1 for _, t in items if not t.get("used"))
     used_cnt = total - active_cnt
 
-    # Сумма выручки
     revenue = 0
     for code, t in items:
         row = _ticket_csv_row(code, t)
@@ -2352,7 +2517,6 @@ async def admin_tickets_csv(call: CallbackQuery):
         except (TypeError, ValueError):
             pass
 
-    # Итоговая строка
     rows.append([])
     rows.append(["", "", "", "", "", "", "", "", "", "ИТОГО:", total_sum])
 
@@ -2375,6 +2539,7 @@ async def admin_tickets_csv(call: CallbackQuery):
         parse_mode="HTML",
     )
     await call.answer("Отправляю CSV...")
+
 
 # ================== КОСТЫЛЬ ДЛЯ RENDER ==================
 _main_loop = None
@@ -2403,12 +2568,19 @@ def start_keepalive_server():
                     payment_id = obj.get("id", "")
                     status = obj.get("status", "")
 
-                    print(f"[YOOKASSA WEBHOOK] event={event}, payment_id={payment_id}, status={status}")
+                    # Логируем IP для диагностики (может быть в X-Forwarded-For)
+                    client_ip = self.client_address[0]
+                    forwarded = self.headers.get("X-Forwarded-For", "")
+                    print(
+                        f"[YOOKASSA WEBHOOK] event={event}, payment_id={payment_id}, "
+                        f"status={status}, ip={client_ip}, xff={forwarded}"
+                    )
 
                     if event == "payment.succeeded" and status == "succeeded":
                         if _main_loop:
+                            # ВАЛИДАЦИЯ через API ЮKassa (защита от подделки)
                             asyncio.run_coroutine_threadsafe(
-                                process_successful_payment(payment_id),
+                                verify_and_process(payment_id),
                                 _main_loop
                             )
 
@@ -2434,6 +2606,27 @@ def start_keepalive_server():
     with ReusableTCPServer(("", PORT), MainHandler) as httpd:
         print(f"[KEEPALIVE] HTTP-сервер запущен на порту {PORT}")
         httpd.serve_forever()
+
+
+async def verify_and_process(payment_id: str):
+    """
+    Проверяет платёж через API ЮKassa и обрабатывает если реальный.
+    Защита от поддельных webhook.
+    """
+    # Если уже обработан — не тратим запрос к API
+    if payment_id in processed_payments:
+        print(f"[YOOKASSA] ⚠️ Платёж {payment_id} уже обработан (до верификации)")
+        return
+
+    # Верификация через API (синхронный вызов в отдельном потоке)
+    is_real = await asyncio.to_thread(verify_payment_with_yookassa, payment_id)
+
+    if not is_real:
+        print(f"[YOOKASSA] ⛔ Поддельный или неизвестный платёж {payment_id} — игнорируем")
+        return
+
+    print(f"[YOOKASSA] ✅ Платёж {payment_id} подтверждён через API — обрабатываем")
+    await process_successful_payment(payment_id)
 
 
 async def _self_ping_loop():

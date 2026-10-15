@@ -247,7 +247,6 @@ def load_data():
     except Exception as e:
         print(f"[SUPABASE] Ошибка загрузки: {e}")
 
-
 # ================== ЮKASSA ==================
 def create_yookassa_payment(amount: int, description: str, user_id: int, metadata: dict) -> dict:
     """Создаёт платёж в ЮKassa."""
@@ -785,7 +784,6 @@ async def send_report_to_admin():
         print(f"[EMAIL] Отчёт отправлен на {ADMIN_EMAIL}")
     except Exception as e:
         print(f"[EMAIL] Ошибка: {e}")
-
 
 # ================== СОСТОЯНИЯ ==================
 class Reg(StatesGroup):
@@ -1589,7 +1587,7 @@ async def checker_process_name(message: Message, state: FSMContext):
     text = f"🔍 Найдено: <b>{len(found)}</b>\n\n"
     buttons = []
     for code, t in found[:10]:
-        status = "✅" if t.get("used") else "🟢"
+        status = "🔴" if t.get("used") else "🟢"
         type_label = "Парный" if t.get("type") == "pair" else "Обычный"
         text += (
             f"{status} <code>{code}</code>\n"
@@ -1641,7 +1639,7 @@ async def checker_show_ticket(call: CallbackQuery):
 # ================== КАРТОЧКА БИЛЕТА ДЛЯ CHECKER'А ==================
 async def show_checker_ticket_card(message: Message, code: str, ticket: dict):
     """Показывает карточку билета с кнопкой погашения (для checker'а)."""
-    status = "✅ использован" if ticket.get("used") else "🟢 активен"
+    status = "🔴 использован" if ticket.get("used") else "🟢 активен"
 
     holder_name = ticket.get("holder", "—")
     holder_username = ""
@@ -1678,6 +1676,11 @@ async def show_checker_ticket_card(message: Message, code: str, ticket: dict):
             text="✅ Погасить билет",
             callback_data=f"checker:use:{code}"
         )])
+    # Обновить статус
+    kb_rows.append([InlineKeyboardButton(
+        text="🔄 Обновить",
+        callback_data=f"checker:show:{code}"
+    )])
     kb_rows.append([InlineKeyboardButton(
         text="📷 Сканировать ещё",
         callback_data="checker:scan_qr"
@@ -1696,7 +1699,7 @@ async def show_checker_ticket_card(message: Message, code: str, ticket: dict):
 # ================== КАРТОЧКА БИЛЕТА ДЛЯ ГЛАВНОГО АДМИНА ==================
 async def show_super_admin_ticket_card(message: Message, code: str, ticket: dict):
     """Карточка билета для главного админа."""
-    status = "✅ использован" if ticket.get("used") else "🟢 активен"
+    status = "🔴 использован" if ticket.get("used") else "🟢 активен"
 
     holder_name = ticket.get("holder", "—")
     holder_username = ""
@@ -1779,6 +1782,7 @@ async def checker_use_ticket(call: CallbackQuery):
 
     log_ticket_action(code, checker, action="used")
 
+    # Уведомление главному админу
     try:
         checker_name = checker.get("name") or call.from_user.full_name
         await bot.send_message(
@@ -1793,6 +1797,24 @@ async def checker_use_ticket(call: CallbackQuery):
     except Exception:
         pass
 
+    # 🆕 Уведомление гостю (владельцу билета)
+    try:
+        owner_id = ticket.get("user_id")
+        if owner_id:
+            await bot.send_message(
+                owner_id,
+                f"✅ <b>Билет погашен!</b>\n\n"
+                f"🎫 Код: <code>{code}</code>\n"
+                f"🎉 {ticket.get('event_title', '—')}\n"
+                f"📅 {ticket.get('event_date', '—')}\n"
+                f"👤 {ticket.get('holder', '—')}\n\n"
+                f"Хорошего вечера! 💃🕺",
+                parse_mode="HTML",
+            )
+    except Exception as e:
+        print(f"[NOTIFY] Ошибка уведомления гостя: {e}")
+
+    # Checker видит подтверждение
     checker_name = checker.get("name") or call.from_user.full_name
     await call.message.edit_text(
         f"✅ <b>Билет погашен</b>\n\n"
@@ -1824,6 +1846,22 @@ async def admin_use_ticket_qr(call: CallbackQuery):
 
     ticket["used"] = True
     save_data()
+
+    # 🆕 Уведомление гостю (владельцу билета)
+    try:
+        owner_id = ticket.get("user_id")
+        if owner_id:
+            await bot.send_message(
+                owner_id,
+                f"✅ <b>Билет погашен!</b>\n\n"
+                f"🎫 Код: <code>{code}</code>\n"
+                f"🎉 {ticket.get('event_title', '—')}\n"
+                f"📅 {ticket.get('event_date', '—')}\n\n"
+                f"Хорошего вечера! 💃🕺",
+                parse_mode="HTML",
+            )
+    except Exception as e:
+        print(f"[NOTIFY] Ошибка уведомления гостя: {e}")
 
     await call.message.edit_text(
         f"✅ <b>Билет погашен</b> <i>(главный админ)</i>\n\n"
@@ -1916,6 +1954,7 @@ async def checker_stats(call: CallbackQuery):
     )
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data="checker:stats")],
         [InlineKeyboardButton(text="⬅️ В меню", callback_data="checker:menu")],
     ])
 
@@ -2281,6 +2320,7 @@ async def admin_chk_list(call: CallbackQuery):
         )
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data="admin:chk:list")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin:checkers")],
     ])
     await call.message.edit_text(text[:4000], reply_markup=kb, parse_mode="HTML")
@@ -2479,6 +2519,7 @@ async def admin_list(call: CallbackQuery):
         status = "🟢" if e.get("active") else "🔴"
         text += f"{status} <b>{e['title']}</b>\n   📅 {e['date_text']}\n   🆔 <code>{e['id']}</code>\n\n"
     kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data="admin:list")],
         [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin:back")],
     ])
     await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
@@ -2531,8 +2572,8 @@ async def admin_stats(call: CallbackQuery):
         f"🎉 Событий: <b>{len(events)}</b>\n"
         f"🛒 Заказов: <b>{paid_orders}</b>\n"
         f"💰 Выручка: <b>{total_revenue} ₽</b>\n\n"
-        f"🎫 Билетов активно: <b>{tickets_active}</b>\n"
-        f"✅ Билетов использовано: <b>{tickets_used}</b>\n"
+        f"🟢 Билетов активно: <b>{tickets_active}</b>\n"
+        f"🔴 Билетов использовано: <b>{tickets_used}</b>\n"
         f"🚫 В ЧС: <b>{len(blacklist)}</b>\n"
         f"📊 Попыток рег.: <b>{len(reg_attempts)}</b>\n"
         f"🎫 Checkers: <b>{len(checkers)}</b>\n"
@@ -2544,6 +2585,7 @@ async def admin_stats(call: CallbackQuery):
             text += f"• {title}: {info['count']} шт, {info['sum']} ₽\n"
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data="admin:stats")],
         [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin:back")],
     ])
     await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
@@ -2571,6 +2613,7 @@ async def admin_blacklist_menu(call: CallbackQuery, state: FSMContext):
 async def admin_blacklist_list(call: CallbackQuery):
     text = get_blacklist_text()
     kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data="admin:bl:list")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin:blacklist")],
     ])
     await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
@@ -2676,6 +2719,7 @@ async def admin_reg_attempts(call: CallbackQuery):
 
     text = get_reg_attempts_text(limit=30)
     kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data="admin:reg_attempts")],
         [InlineKeyboardButton(text="📤 Скачать CSV", callback_data="admin:reg_attempts:csv")],
         [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin:back")],
     ])
@@ -2758,6 +2802,9 @@ def build_users_page(page: int):
     if nav_buttons:
         kb_rows.append(nav_buttons)
 
+    kb_rows.append([InlineKeyboardButton(
+        text="🔄 Обновить", callback_data=f"admin:users:{page}"
+    )])
     kb_rows.append([InlineKeyboardButton(
         text="📤 Выгрузить всех в CSV", callback_data="admin:users:export"
     )])
@@ -2929,7 +2976,7 @@ async def admin_find_ticket(message: Message, state: FSMContext):
         await message.answer("❌ Билет с таким кодом не найден.")
         return
 
-    status = "✅ использован" if ticket.get("used") else "🟢 активен"
+    status = "🔴 использован" if ticket.get("used") else "🟢 активен"
     holder_info = _ticket_holder_info(ticket).rstrip("\n")
     text = (
         f"🎫 <b>Билет найден</b>\n\n"
@@ -2965,8 +3012,30 @@ async def admin_use_ticket(call: CallbackQuery):
     if not ticket:
         await call.answer("Билет не найден")
         return
+
+    if ticket.get("used"):
+        await call.answer("Билет уже погашен")
+        return
+
     ticket["used"] = True
     save_data()
+
+    # Уведомление гостю
+    try:
+        owner_id = ticket.get("user_id")
+        if owner_id:
+            await bot.send_message(
+                owner_id,
+                f"✅ <b>Билет погашен!</b>\n\n"
+                f"🎫 Код: <code>{code}</code>\n"
+                f"🎉 {ticket.get('event_title', '—')}\n"
+                f"📅 {ticket.get('event_date', '—')}\n\n"
+                f"Хорошего вечера! 💃🕺",
+                parse_mode="HTML",
+            )
+    except Exception as e:
+        print(f"[NOTIFY] Ошибка уведомления гостя: {e}")
+
     await call.message.edit_text(
         f"✅ Билет <code>{code}</code> отмечен как использованный.",
         parse_mode="HTML",
@@ -2978,7 +3047,8 @@ TICKETS_PER_PAGE = 5
 
 
 def _ticket_short_status(t: dict) -> str:
-    return "✅" if t.get("used") else "🟢"
+    """🔴 — погашен, 🟢 — активен."""
+    return "🔴" if t.get("used") else "🟢"
 
 
 def _ticket_event_date(t: dict) -> str:
@@ -3133,7 +3203,7 @@ def build_all_tickets_page(page: int, event_id: Optional[str] = None):
             pass
 
     text = header + "\n"
-    text += f"Всего: <b>{total}</b> | 🟢 активных: <b>{active_cnt}</b> | ✅ погашено: <b>{used_cnt}</b>\n"
+    text += f"Всего: <b>{total}</b> | 🟢 активных: <b>{active_cnt}</b> | 🔴 погашено: <b>{used_cnt}</b>\n"
     text += f"💰 Выручка: <b>{revenue} ₽</b>\n"
     text += f"Страница {page + 1} из {total_pages}\n\n"
 
@@ -3163,6 +3233,12 @@ def build_all_tickets_page(page: int, event_id: Optional[str] = None):
         ))
     if nav:
         kb_rows.append(nav)
+
+    # Кнопка «Обновить» — сохраняет текущую страницу и событие
+    refresh_cb = f"{prefix}:{page}"
+    kb_rows.append([InlineKeyboardButton(
+        text="🔄 Обновить", callback_data=refresh_cb
+    )])
 
     if event_id:
         kb_rows.append([InlineKeyboardButton(
@@ -3216,7 +3292,7 @@ async def admin_tickets_root(call: CallbackQuery):
         f"🎟 <b>Билеты</b>\n\n"
         f"Всего: <b>{total}</b>\n"
         f"🟢 Активных: <b>{active}</b>\n"
-        f"✅ Погашено: <b>{total - active}</b>\n\n"
+        f"🔴 Погашено: <b>{total - active}</b>\n\n"
         f"Выберите, как смотреть:"
     )
     await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
@@ -3335,7 +3411,7 @@ async def admin_tickets_csv(call: CallbackQuery):
             f"🎟 <b>Билеты</b> — {label}\n\n"
             f"Всего: <b>{len(items)}</b>\n"
             f"🟢 Активных: <b>{active_cnt}</b>\n"
-            f"✅ Погашено: <b>{used_cnt}</b>\n"
+            f"🔴 Погашено: <b>{used_cnt}</b>\n"
             f"💰 Сумма: <b>{total_sum} ₽</b>\n\n"
             f"Сформировано: {datetime.now().strftime('%Y-%m-%d %H:%M')}"
         ),
@@ -3363,6 +3439,10 @@ async def show_events(call: CallbackQuery):
             text=f"💃 {e['title']} — {e['date_text']}",
             callback_data=f"event:{e['id']}"
         )])
+
+    buttons.append([InlineKeyboardButton(
+        text="🔄 Обновить", callback_data="show_events"
+    )])
 
     await call.message.answer(
         "🎉 <b>Выберите мероприятие:</b>",
@@ -3402,12 +3482,12 @@ async def my_tickets(call: CallbackQuery):
         f"🎟 <b>Мои билеты</b>\n\n"
         f"Всего: <b>{len(user_tickets)}</b>\n"
         f"🟢 Активных: <b>{active_cnt}</b>\n"
-        f"✅ Использовано: <b>{used_cnt}</b>\n\n"
+        f"🔴 Использовано: <b>{used_cnt}</b>\n\n"
     )
 
     buttons = []
     for code, t in user_tickets:
-        status = "✅" if t.get("used") else "🟢"
+        status = "🔴" if t.get("used") else "🟢"
         type_label = "Парный" if t.get("type") == "pair" else "Обычный"
         event_title = t.get("event_title", "—")
         event_date = t.get("event_date", "—")
@@ -3429,6 +3509,9 @@ async def my_tickets(call: CallbackQuery):
                 callback_data=f"my_ticket:send:{code}"
             )])
 
+    buttons.append([InlineKeyboardButton(
+        text="🔄 Обновить", callback_data="my_tickets"
+    )])
     buttons.append([InlineKeyboardButton(
         text="🎉 Мероприятия", callback_data="show_events"
     )])

@@ -4363,4 +4363,45 @@ async def _self_ping_loop():
     """Пингует свой URL каждые 10 минут."""
     render_url = os.getenv("RENDER_EXTERNAL_URL", "")
     if not render_url:
-        print("[KEEPALIVE]
+        print("[KEEPALIVE] RENDER_EXTERNAL_URL не задан — самопинг отключён")
+        return
+
+    print(f"[KEEPALIVE] Самопинг активирован для {render_url}")
+    while True:
+        await asyncio.sleep(600)
+        try:
+            await asyncio.to_thread(urllib.request.urlopen, render_url, timeout=10)
+            print("[KEEPALIVE] Самопинг успешен")
+        except Exception as e:
+            print(f"[KEEPALIVE] Самопинг ошибка: {e}")
+
+
+def start_keepalive():
+    """Запускает HTTP-сервер в фоновом потоке."""
+    server_thread = threading.Thread(target=start_keepalive_server, daemon=True)
+    server_thread.start()
+
+
+def start_self_ping():
+    """Запускает самопинг в фоне (async)."""
+    asyncio.create_task(_self_ping_loop())
+
+
+# ================== ЗАПУСК ==================
+async def main():
+    global _main_loop
+    _main_loop = asyncio.get_running_loop()
+
+    load_data()
+    print("🚀 Бот запускается...")
+
+    start_keepalive()
+    start_self_ping()
+
+    me = await bot.get_me()
+    print(f"✅ Бот @{me.username} работает")
+    await dp.start_polling(bot)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

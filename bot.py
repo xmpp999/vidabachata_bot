@@ -3211,7 +3211,7 @@ async def my_tickets(call: CallbackQuery):
 
     buttons = []
     for code, t in user_tickets:
-        status = "✅" if t.get("used") else "🟢"
+        status = "🔴" if t.get("used") else "🟢"
         type_label = "Парный" if t.get("type") == "pair" else "Обычный"
         event_title = t.get("event_title", "—")
         event_date = t.get("event_date", "—")

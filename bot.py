@@ -14,6 +14,7 @@ import socketserver
 import threading
 import urllib.request
 import uuid
+import zipfile
 from datetime import datetime, timedelta
 from email.message import EmailMessage
 from typing import Optional
@@ -34,7 +35,15 @@ from aiogram.types import (
     ReplyKeyboardRemove,
 )
 from dotenv import load_dotenv
+from openpyxl import Workbook
+from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from PIL import Image
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from supabase import create_client, Client
 from yookassa import Configuration, Payment
 
@@ -848,7 +857,6 @@ async def send_report_to_admin():
     except Exception as e:
         print(f"[EMAIL] Ошибка: {e}")
 
-
 # ================== СОСТОЯНИЯ ==================
 class Reg(StatesGroup):
     phone = State()
@@ -914,7 +922,7 @@ async def start(message: Message, state: FSMContext):
     user_id = message.from_user.id
     user_name = message.from_user.first_name or "друг"
 
-       # ============ ГЛАВНЫЙ АДМИН ============
+    # ============ ГЛАВНЫЙ АДМИН ============
     if user_id == ADMIN_ID:
         greeting = (
             f"Привет, {user_name} 👋\n"
@@ -2037,8 +2045,9 @@ async def show_admin_menu(message: Message, state: FSMContext):
         [InlineKeyboardButton(text="📈 Статистика", callback_data="admin:stats")],
         [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin:broadcast")],
         [InlineKeyboardButton(text="🎟 Все билеты", callback_data="admin:tickets")],
+        [InlineKeyboardButton(text="📤 Выгрузка билетов", callback_data="admin:export")],
         [InlineKeyboardButton(text="🎫 Найти билет", callback_data="admin:find_ticket")],
-        [InlineKeyboardButton(text="📤 Отправить отчёт на email", callback_data="admin:report")],
+        [InlineKeyboardButton(text="📧 Отправить отчёт на email", callback_data="admin:report")],
     ])
     await message.answer(
         f"🛠 <b>Админ-панель</b>\n\n"
@@ -2643,147 +2652,6 @@ async def admin_stats(call: CallbackQuery):
     await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
 
 
-# ================== ЧЁРНЫЙ СПИСОК (АДМИН) ==================
-@dp.callback_query(F.data == "admin:blacklist")
-async def admin_blacklist_menu(call: CallbackQuery):
-    if call.from_user.id != ADMIN_ID:
-        await call.answer("Только для админа", show_alert=True)
-        return
-
-    text = get_blacklist_text()[:4000]
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Добавить username", callback_data="admin:bl:add_username")],
-        [InlineKeyboardButton(text="📱 Добавить телефон", callback_data="admin:bl:add_phone")],
-        [InlineKeyboardButton(text="🗑 Удалить", callback_data="admin:bl:remove")],
-        [InlineKeyboardButton(text="🔄 Обновить", callback_data="admin:blacklist")],
-        [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin:back")],
-    ])
-    await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
-
-
-@dp.callback_query(F.data == "admin:bl:add_username")
-async def admin_bl_add_username(call: CallbackQuery, state: FSMContext):
-    await state.update_data(bl_type="username")
-    await call.message.edit_text(
-        "🚫 <b>Добавление в ЧС</b>\n\n"
-        "Шаг 1/2. Отправьте <b>@username</b>:\n\n"
-        "Для отмены — /admin",
-        parse_mode="HTML",
-    )
-    await state.set_state(Admin.blacklist_add_username)
-
-
-@dp.message(Admin.blacklist_add_username)
-async def admin_bl_save_username(message: Message, state: FSMContext):
-    if message.text == "/admin":
-        await state.clear()
-        await show_admin_menu(message, state)
-        return
-
-    value = message.text.strip()
-    if not value.startswith("@"):
-        value = "@" + value
-
-    await state.update_data(bl_value=value)
-    await state.set_state(Admin.blacklist_reason)
-    await message.answer("Шаг 2/2. Причина (или <code>-</code>):", parse_mode="HTML")
-
-
-@dp.callback_query(F.data == "admin:bl:add_phone")
-async def admin_bl_add_phone(call: CallbackQuery, state: FSMContext):
-    await state.update_data(bl_type="phone")
-    await call.message.edit_text(
-        "🚫 <b>Добавление в ЧС</b>\n\n"
-        "Шаг 1/2. Отправьте <b>номер телефона</b>:\n\n"
-        "Для отмены — /admin",
-        parse_mode="HTML",
-    )
-    await state.set_state(Admin.blacklist_add_phone)
-
-
-@dp.message(Admin.blacklist_add_phone)
-async def admin_bl_save_phone(message: Message, state: FSMContext):
-    if message.text == "/admin":
-        await state.clear()
-        await show_admin_menu(message, state)
-        return
-
-    value = message.text.strip()
-    await state.update_data(bl_value=value)
-    await state.set_state(Admin.blacklist_reason)
-    await message.answer("Шаг 2/2. Причина (или <code>-</code>):", parse_mode="HTML")
-
-
-@dp.message(Admin.blacklist_reason)
-async def admin_bl_save_reason(message: Message, state: FSMContext):
-    reason = message.text.strip()
-    if reason == "-":
-        reason = ""
-
-    data = await state.get_data()
-    bl_type = data.get("bl_type", "username")
-    bl_value = data.get("bl_value", "")
-
-    ok = add_to_blacklist(bl_type, bl_value, reason)
-    await state.clear()
-
-    if ok:
-        await message.answer(f"✅ Добавлено в ЧС: <code>{bl_value}</code>", parse_mode="HTML")
-    else:
-        await message.answer("⚠️ Уже в ЧС.")
-
-    await show_admin_menu(message, state)
-
-
-@dp.callback_query(F.data == "admin:bl:remove")
-async def admin_bl_remove_start(call: CallbackQuery):
-    if not blacklist:
-        await call.answer("ЧС пуст", show_alert=True)
-        return
-
-    buttons = []
-    for key, item in list(blacklist.items())[:30]:
-        icon = "📱" if item.get("type") == "phone" else "👤"
-        buttons.append([InlineKeyboardButton(
-            text=f"🗑 {icon} {item.get('value')}",
-            callback_data=f"admin:bl:del:{item.get('value')}"
-        )])
-    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="admin:blacklist")])
-
-    await call.message.edit_text(
-        "🗑 Выберите запись для удаления:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
-    )
-
-
-@dp.callback_query(F.data.startswith("admin:bl:del:"))
-async def admin_bl_remove_confirm(call: CallbackQuery):
-    value = call.data.split(":", 3)[3]
-    ok = remove_from_blacklist(value)
-    if ok:
-        await call.answer("Удалено")
-    else:
-        await call.answer("Не найдено", show_alert=True)
-    await admin_blacklist_menu(call)
-
-
-# ================== ПОПЫТКИ РЕГИСТРАЦИИ (АДМИН) ==================
-@dp.callback_query(F.data == "admin:reg_attempts")
-async def admin_reg_attempts(call: CallbackQuery):
-    if call.from_user.id != ADMIN_ID:
-        await call.answer("Только для админа", show_alert=True)
-        return
-
-    text = get_reg_attempts_text(limit=30)[:4000]
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔄 Обновить", callback_data="admin:reg_attempts")],
-        [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin:back")],
-    ])
-    await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
-
-
 # ================== ПОЛЬЗОВАТЕЛИ (АДМИН) ==================
 PAGE_SIZE = 10
 
@@ -2970,7 +2838,7 @@ async def admin_find_ticket_query(message: Message, state: FSMContext):
         await state.clear()
         return
 
-        buttons = []
+    buttons = []
     for code, t in found[:30]:
         holder = t.get("holder", "—")
         status = "🔴" if t.get("used") else "🟢"
@@ -3069,7 +2937,7 @@ async def admin_tickets(call: CallbackQuery):
         f"🎫 <b>Все билеты</b>\n\n"
         f"Всего: <b>{total}</b>\n"
         f"🟢 Активных: <b>{active}</b>\n"
-        f"✅ Погашено: <b>{used}</b>\n\n"
+        f"🔴 Погашено: <b>{used}</b>\n\n"
         f"Страница {page + 1}/{total_pages}\n\n"
     )
 
@@ -3095,6 +2963,7 @@ async def admin_tickets(call: CallbackQuery):
         nav,
         [InlineKeyboardButton(text="🔄 Обновить", callback_data=f"admin:tickets:{page}")],
         [InlineKeyboardButton(text="📥 Скачать CSV", callback_data="admin:tickets_csv")],
+        [InlineKeyboardButton(text="📤 Выгрузка билетов", callback_data="admin:export")],
         [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin:back")],
     ])
     await call.message.edit_text(text[:4000], reply_markup=kb, parse_mode="HTML")
@@ -3133,6 +3002,516 @@ async def admin_tickets_csv(call: CallbackQuery):
     await call.message.answer_document(
         BufferedInputFile(csv_bytes, filename="tickets.csv"),
         caption=f"🎫 Все билеты ({len(rows)})",
+    )
+    await call.answer()
+
+
+# ================== ЧЁРНЫЙ СПИСОК (АДМИН) ==================
+@dp.callback_query(F.data == "admin:blacklist")
+async def admin_blacklist_menu(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("Только для админа", show_alert=True)
+        return
+
+    text = get_blacklist_text()[:4000]
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Добавить username", callback_data="admin:bl:add_username")],
+        [InlineKeyboardButton(text="📱 Добавить телефон", callback_data="admin:bl:add_phone")],
+        [InlineKeyboardButton(text="🗑 Удалить", callback_data="admin:bl:remove")],
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data="admin:blacklist")],
+        [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin:back")],
+    ])
+    await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+
+
+@dp.callback_query(F.data == "admin:bl:add_username")
+async def admin_bl_add_username(call: CallbackQuery, state: FSMContext):
+    await state.update_data(bl_type="username")
+    await call.message.edit_text(
+        "🚫 <b>Добавление в ЧС</b>\n\n"
+        "Шаг 1/2. Отправьте <b>@username</b>:\n\n"
+        "Для отмены — /admin",
+        parse_mode="HTML",
+    )
+    await state.set_state(Admin.blacklist_add_username)
+
+
+@dp.message(Admin.blacklist_add_username)
+async def admin_bl_save_username(message: Message, state: FSMContext):
+    if message.text == "/admin":
+        await state.clear()
+        await show_admin_menu(message, state)
+        return
+
+    value = message.text.strip()
+    if not value.startswith("@"):
+        value = "@" + value
+
+    await state.update_data(bl_value=value)
+    await state.set_state(Admin.blacklist_reason)
+    await message.answer("Шаг 2/2. Причина (или <code>-</code>):", parse_mode="HTML")
+
+
+@dp.callback_query(F.data == "admin:bl:add_phone")
+async def admin_bl_add_phone(call: CallbackQuery, state: FSMContext):
+    await state.update_data(bl_type="phone")
+    await call.message.edit_text(
+        "🚫 <b>Добавление в ЧС</b>\n\n"
+        "Шаг 1/2. Отправьте <b>номер телефона</b>:\n\n"
+        "Для отмены — /admin",
+        parse_mode="HTML",
+    )
+    await state.set_state(Admin.blacklist_add_phone)
+
+
+@dp.message(Admin.blacklist_add_phone)
+async def admin_bl_save_phone(message: Message, state: FSMContext):
+    if message.text == "/admin":
+        await state.clear()
+        await show_admin_menu(message, state)
+        return
+
+    value = message.text.strip()
+    await state.update_data(bl_value=value)
+    await state.set_state(Admin.blacklist_reason)
+    await message.answer("Шаг 2/2. Причина (или <code>-</code>):", parse_mode="HTML")
+
+
+@dp.message(Admin.blacklist_reason)
+async def admin_bl_save_reason(message: Message, state: FSMContext):
+    reason = message.text.strip()
+    if reason == "-":
+        reason = ""
+
+    data = await state.get_data()
+    bl_type = data.get("bl_type", "username")
+    bl_value = data.get("bl_value", "")
+
+    ok = add_to_blacklist(bl_type, bl_value, reason)
+    await state.clear()
+
+    if ok:
+        await message.answer(f"✅ Добавлено в ЧС: <code>{bl_value}</code>", parse_mode="HTML")
+    else:
+        await message.answer("⚠️ Уже в ЧС.")
+
+    await show_admin_menu(message, state)
+
+
+@dp.callback_query(F.data == "admin:bl:remove")
+async def admin_bl_remove_start(call: CallbackQuery):
+    if not blacklist:
+        await call.answer("ЧС пуст", show_alert=True)
+        return
+
+    buttons = []
+    for key, item in list(blacklist.items())[:30]:
+        icon = "📱" if item.get("type") == "phone" else "👤"
+        buttons.append([InlineKeyboardButton(
+            text=f"🗑 {icon} {item.get('value')}",
+            callback_data=f"admin:bl:del:{item.get('value')}"
+        )])
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="admin:blacklist")])
+
+    await call.message.edit_text(
+        "🗑 Выберите запись для удаления:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+    )
+
+
+@dp.callback_query(F.data.startswith("admin:bl:del:"))
+async def admin_bl_remove_confirm(call: CallbackQuery):
+    value = call.data.split(":", 3)[3]
+    ok = remove_from_blacklist(value)
+    if ok:
+        await call.answer("Удалено")
+    else:
+        await call.answer("Не найдено", show_alert=True)
+    await admin_blacklist_menu(call)
+
+
+# ================== ПОПЫТКИ РЕГИСТРАЦИИ (АДМИН) ==================
+@dp.callback_query(F.data == "admin:reg_attempts")
+async def admin_reg_attempts(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("Только для админа", show_alert=True)
+        return
+
+    text = get_reg_attempts_text(limit=30)[:4000]
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data="admin:reg_attempts")],
+        [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin:back")],
+    ])
+    await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+
+
+# ================== ФУНКЦИИ ЭКСПОРТА ==================
+def _export_tickets_data(tickets_filtered: list) -> list:
+    """Готовит строки для экспорта билетов."""
+    rows = []
+    for code, t in tickets_filtered:
+        owner = users.get(t.get("user_id"), {})
+        rows.append([
+            code,
+            t.get("user_id", ""),
+            t.get("holder", ""),
+            owner.get("phone", ""),
+            owner.get("username", ""),
+            t.get("type", ""),
+            "использован" if t.get("used") else "активен",
+            t.get("event_title", ""),
+            t.get("event_date", ""),
+            t.get("issued_at", ""),
+            t.get("used_at", ""),
+            t.get("used_by", ""),
+        ])
+    return rows
+
+
+def _tickets_headers():
+    return [
+        "ticket_code", "holder_id", "holder_name", "phone", "username",
+        "type", "status", "event_title", "event_date", "issued_at",
+        "used_at", "used_by",
+    ]
+
+
+def make_xlsx(headers: list, rows: list) -> bytes:
+    """Создаёт XLSX с красивым форматированием."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Билеты"
+
+    # Заголовки
+    header_font = Font(bold=True, color="FFFFFF", size=11)
+    header_fill = PatternFill("solid", fgColor="4472C4")
+    header_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    thin_border = Border(
+        left=Side(style="thin"), right=Side(style="thin"),
+        top=Side(style="thin"), bottom=Side(style="thin"),
+    )
+
+    for col_num, header in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=col_num, value=header)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = header_align
+        cell.border = thin_border
+
+    # Данные
+    for row_num, row in enumerate(rows, 2):
+        for col_num, value in enumerate(row, 1):
+            cell = ws.cell(row=row_num, column=col_num, value=value)
+            cell.border = thin_border
+            cell.alignment = Alignment(vertical="center", wrap_text=False)
+
+    # Авто-ширина колонок
+    for col_num in range(1, len(headers) + 1):
+        col_letter = ws.cell(row=1, column=col_num).column_letter
+        max_len = len(str(headers[col_num - 1]))
+        for row_num in range(2, len(rows) + 2):
+            val = ws.cell(row=row_num, column=col_num).value
+            if val:
+                max_len = max(max_len, len(str(val)))
+        ws.column_dimensions[col_letter].width = min(max_len + 3, 40)
+
+    # Закрепим первую строку
+    ws.freeze_panes = "A2"
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf.getvalue()
+
+
+def make_pdf(headers: list, rows: list, title: str = "Список билетов") -> bytes:
+    """Создаёт PDF с таблицей билетов."""
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf, pagesize=landscape(A4),
+        leftMargin=15, rightMargin=15, topMargin=15, bottomMargin=15,
+    )
+
+    # Регистрируем шрифт с кириллицей
+    try:
+        pdfmetrics.registerFont(TTFont("DejaVu", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"))
+        base_font = "DejaVu"
+    except Exception:
+        try:
+            pdfmetrics.registerFont(TTFont("DejaVu", "/usr/share/fonts/dejavu/DejaVuSans.ttf"))
+            base_font = "DejaVu"
+        except Exception:
+            base_font = "Helvetica"
+
+    styles = getSampleStyleSheet()
+    title_style = styles["Heading1"]
+    title_style.fontName = base_font
+
+    elements = []
+    elements.append(Paragraph(title, title_style))
+    elements.append(Spacer(1, 12))
+
+    table_data = [headers] + rows
+
+    table = Table(table_data, repeatRows=1)
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#4472C4")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), base_font),
+        ("FONTNAME", (0, 1), (-1, -1), base_font),
+        ("FONTSIZE", (0, 0), (-1, -1), 7),
+        ("ALIGN", (0, 0), (-1, -1), "LEFT"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F2F2F2")]),
+        ("LEFTPADDING", (0, 0), (-1, -1), 3),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+    ]))
+
+    elements.append(table)
+    doc.build(elements)
+    buf.seek(0)
+    return buf.getvalue()
+
+
+def make_zip_qr(tickets_filtered: list) -> bytes:
+    """Создаёт ZIP с PNG QR-кодами всех билетов."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for code, t in tickets_filtered:
+            # Генерируем QR в PNG
+            qr = qrcode.QRCode(version=1, box_size=10, border=2)
+            qr.add_data(code)
+            qr.make(fit=True)
+            img = qr.make_image(fill_color="black", back_color="white")
+
+            img_buf = io.BytesIO()
+            img.save(img_buf, format="PNG")
+            img_buf.seek(0)
+
+            # Имя файла: код + имя владельца
+            holder = (t.get("holder") or "guest").replace(" ", "_")[:20]
+            filename = f"{code}_{holder}.png"
+            zf.writestr(filename, img_buf.getvalue())
+    buf.seek(0)
+    return buf.getvalue()
+
+
+def _apply_filter(mode: str) -> list:
+    """Применяет фильтр к билетам."""
+    if mode == "all":
+        return list(tickets.items())
+    elif mode == "used":
+        return [(c, t) for c, t in tickets.items() if t.get("used")]
+    elif mode == "active":
+        return [(c, t) for c, t in tickets.items() if not t.get("used")]
+    elif mode == "pair":
+        return [(c, t) for c, t in tickets.items() if t.get("type") == "pair"]
+    elif mode == "single":
+        return [(c, t) for c, t in tickets.items() if t.get("type") != "pair"]
+    return list(tickets.items())
+
+
+# ================== МЕНЮ ЭКСПОРТА БИЛЕТОВ ==================
+@dp.callback_query(F.data == "admin:export")
+async def admin_export_menu(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("Только для админа", show_alert=True)
+        return
+
+    total = len(tickets)
+    active = sum(1 for t in tickets.values() if not t.get("used"))
+    used = total - active
+
+    text = (
+        f"📤 <b>Выгрузка билетов</b>\n\n"
+        f"Всего: <b>{total}</b>\n"
+        f"🟢 Активных: <b>{active}</b>\n"
+        f"🔴 Погашено: <b>{used}</b>\n\n"
+        f"Выберите формат:"
+    )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 Excel (XLSX)", callback_data="admin:export:xlsx:all")],
+        [InlineKeyboardButton(text="📄 PDF", callback_data="admin:export:pdf:all")],
+        [InlineKeyboardButton(text="📦 ZIP с QR-кодами", callback_data="admin:export:zip:all")],
+        [InlineKeyboardButton(text="📋 CSV", callback_data="admin:export:csv:all")],
+        [InlineKeyboardButton(text="🎯 Фильтры", callback_data="admin:export:filter")],
+        [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin:back")],
+    ])
+
+    await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+
+
+@dp.callback_query(F.data == "admin:export:filter")
+async def admin_export_filter(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("Только для админа", show_alert=True)
+        return
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔴 Только погашенные", callback_data="admin:export:xlsx:used")],
+        [InlineKeyboardButton(text="🟢 Только активные", callback_data="admin:export:xlsx:active")],
+        [InlineKeyboardButton(text="🎟 Только парные", callback_data="admin:export:xlsx:pair")],
+        [InlineKeyboardButton(text="🎫 Только обычные", callback_data="admin:export:xlsx:single")],
+        [InlineKeyboardButton(text="🎉 За конкретное событие", callback_data="admin:export:byevent")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin:export")],
+    ])
+
+    await call.message.edit_text(
+        "🎯 <b>Фильтры билетов</b>\n\n"
+        "Выберите, какие билеты включить в выгрузку:",
+        reply_markup=kb, parse_mode="HTML",
+    )
+
+
+@dp.callback_query(F.data == "admin:export:byevent")
+async def admin_export_byevent(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("Только для админа", show_alert=True)
+        return
+
+    if not events:
+        await call.answer("Нет событий", show_alert=True)
+        return
+
+    buttons = []
+    for e in events:
+        cnt = sum(1 for t in tickets.values() if str(t.get("event_id")) == str(e["id"]))
+        buttons.append([InlineKeyboardButton(
+            text=f"🎉 {e['title'][:30]} ({cnt})",
+            callback_data=f"admin:export:event:{e['id']}"
+        )])
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="admin:export:filter")])
+
+    await call.message.edit_text(
+        "🎉 <b>Выберите событие</b>:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+        parse_mode="HTML",
+    )
+
+
+@dp.callback_query(F.data.startswith("admin:export:event:"))
+async def admin_export_event(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("Только для админа", show_alert=True)
+        return
+
+    event_id = call.data.split(":", 3)[3]
+    filtered = [(c, t) for c, t in tickets.items() if str(t.get("event_id")) == str(event_id)]
+
+    if not filtered:
+        await call.answer("Нет билетов на это событие", show_alert=True)
+        return
+
+    ev = next((e for e in events if str(e["id"]) == str(event_id)), None)
+    title = ev["title"] if ev else "event"
+
+    rows = _export_tickets_data(filtered)
+    xlsx_bytes = make_xlsx(_tickets_headers(), rows)
+
+    await call.message.answer_document(
+        BufferedInputFile(xlsx_bytes, filename=f"tickets_{event_id}.xlsx"),
+        caption=f"📊 Билеты на «{title}» ({len(filtered)} шт)",
+    )
+    await call.answer()
+
+
+@dp.callback_query(F.data.startswith("admin:export:xlsx:"))
+async def admin_export_xlsx(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("Только для админа", show_alert=True)
+        return
+
+    mode = call.data.split(":", 3)[3]
+    filtered = _apply_filter(mode)
+
+    if not filtered:
+        await call.answer("Нет билетов по фильтру", show_alert=True)
+        return
+
+    rows = _export_tickets_data(filtered)
+    xlsx_bytes = make_xlsx(_tickets_headers(), rows)
+
+    await call.message.answer_document(
+        BufferedInputFile(xlsx_bytes, filename=f"tickets_{mode}.xlsx"),
+        caption=f"📊 Excel: {len(filtered)} билетов ({mode})",
+    )
+    await call.answer()
+
+
+@dp.callback_query(F.data.startswith("admin:export:pdf:"))
+async def admin_export_pdf(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("Только для админа", show_alert=True)
+        return
+
+    mode = call.data.split(":", 3)[3]
+    filtered = _apply_filter(mode)
+
+    if not filtered:
+        await call.answer("Нет билетов по фильтру", show_alert=True)
+        return
+
+    rows = _export_tickets_data(filtered)
+    pdf_bytes = make_pdf(_tickets_headers(), rows, title=f"Билеты ({mode}, {len(filtered)} шт)")
+
+    await call.message.answer_document(
+        BufferedInputFile(pdf_bytes, filename=f"tickets_{mode}.pdf"),
+        caption=f"📄 PDF: {len(filtered)} билетов ({mode})",
+    )
+    await call.answer()
+
+
+@dp.callback_query(F.data.startswith("admin:export:zip:"))
+async def admin_export_zip(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("Только для админа", show_alert=True)
+        return
+
+    mode = call.data.split(":", 3)[3]
+    filtered = _apply_filter(mode)
+
+    if not filtered:
+        await call.answer("Нет билетов по фильтру", show_alert=True)
+        return
+
+    if len(filtered) > 200:
+        await call.answer(f"Слишком много билетов ({len(filtered)}). Максимум 200.", show_alert=True)
+        return
+
+    await call.answer("📦 Генерирую ZIP...")
+    zip_bytes = make_zip_qr(filtered)
+
+    await call.message.answer_document(
+        BufferedInputFile(zip_bytes, filename=f"qr_codes_{mode}.zip"),
+        caption=f"📦 ZIP с QR: {len(filtered)} билетов ({mode})",
+    )
+
+
+@dp.callback_query(F.data.startswith("admin:export:csv:"))
+async def admin_export_csv_filtered(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("Только для админа", show_alert=True)
+        return
+
+    mode = call.data.split(":", 3)[3]
+    filtered = _apply_filter(mode)
+
+    if not filtered:
+        await call.answer("Нет билетов по фильтру", show_alert=True)
+        return
+
+    rows = _export_tickets_data(filtered)
+    csv_bytes = make_csv(_tickets_headers(), rows)
+
+    await call.message.answer_document(
+        BufferedInputFile(csv_bytes, filename=f"tickets_{mode}.csv"),
+        caption=f"📋 CSV: {len(filtered)} билетов ({mode})",
     )
     await call.answer()
 
@@ -3206,7 +3585,7 @@ async def my_tickets(call: CallbackQuery):
         f"🎫 <b>Мои билеты</b>\n\n"
         f"Всего: <b>{len(user_tickets)}</b>\n"
         f"🟢 Активных: <b>{active_cnt}</b>\n"
-        f"✅ Использовано: <b>{used_cnt}</b>\n\n"
+        f"🔴 Использовано: <b>{used_cnt}</b>\n\n"
     )
 
     buttons = []
@@ -3844,10 +4223,8 @@ async def show_main_menu(call: CallbackQuery, state: FSMContext):
             [InlineKeyboardButton(text="🛠 Админ-панель", callback_data="admin:back")],
             [InlineKeyboardButton(text="🎉 Мероприятия", callback_data="show_events")],
             [InlineKeyboardButton(text="🎫 Мои билеты", callback_data="my_tickets")],
-            [InlineKeyboardButton(text="ВК", url="https://vk.com/vidabachata"),
-             InlineKeyboardButton(text="Telegram", url="https://t.me/+eTMoEG6V1883Nzli")],
         ])
-    else: 
+    else:
         checker = find_checker_for_user(
             user_id=user_id,
             username=call.from_user.username or "",
@@ -3881,7 +4258,6 @@ async def show_main_menu(call: CallbackQuery, state: FSMContext):
 @dp.callback_query(F.data == "main_menu")
 async def main_menu_callback(call: CallbackQuery, state: FSMContext):
     await show_main_menu(call, state)
-
 
 # ================== КОСТЫЛЬ ДЛЯ RENDER ==================
 _main_loop = None

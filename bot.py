@@ -914,7 +914,7 @@ async def start(message: Message, state: FSMContext):
     user_id = message.from_user.id
     user_name = message.from_user.first_name or "друг"
 
-    # ============ ГЛАВНЫЙ АДМИН ============
+       # ============ ГЛАВНЫЙ АДМИН ============
     if user_id == ADMIN_ID:
         greeting = (
             f"Привет, {user_name} 👋\n"

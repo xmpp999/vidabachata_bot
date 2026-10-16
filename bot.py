@@ -4459,7 +4459,9 @@ async def issue_ticket(user_id: int, code: str, ticket_type: str, holder_name: s
         f"👤 {holder_name}\n"
     )
     if holder_username:
-        caption += (
+    caption += f"💬 @{holder_username}\n"
+
+    caption += (
         f"🎟 {type_label}\n"
         f"📅 {event.get('date_text', '')}\n"
         f"📍 {event.get('place', '')}\n"

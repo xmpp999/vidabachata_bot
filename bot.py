@@ -3073,8 +3073,8 @@ async def admin_tickets(call: CallbackQuery):
         f"Страница {page + 1}/{total_pages}\n\n"
     )
 
-    for code, t in page_items:
-        status = "✅" if t.get("used") else "🟢"
+   for code, t in page_items:
+        status = "🔴" if t.get("used") else "🟢"
         holder = t.get("holder", "—")
         title = t.get("event_title", "—")
         date_text = t.get("event_date", "—")

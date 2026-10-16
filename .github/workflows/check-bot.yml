@@ -1,0 +1,76 @@
+name: Check bot.py for missing functions
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run AST check
+        run: |
+          python - <<'EOF'
+          import ast, sys
+
+          filename = "bot.py"
+          try:
+              with open(filename, encoding="utf-8") as f:
+                  src = f.read()
+          except FileNotFoundError:
+              print(f"❌ Файл {filename} не найден")
+              sys.exit(1)
+
+          try:
+              tree = ast.parse(src)
+          except SyntaxError as e:
+              print(f"❌ Синтаксическая ошибка: строка {e.lineno}: {e.msg}")
+              sys.exit(1)
+
+          defined = set()
+          for node in ast.walk(tree):
+              if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                  defined.add(node.name)
+
+          called = set()
+          for node in ast.walk(tree):
+              if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                  called.add(node.func.id)
+
+          builtins_set = set(dir(__builtins__))
+
+          imported = set()
+          for node in ast.walk(tree):
+              if isinstance(node, ast.Import):
+                  for alias in node.names:
+                      imported.add(alias.asname or alias.name.split(".")[0])
+              elif isinstance(node, ast.ImportFrom):
+                  for alias in node.names:
+                      imported.add(alias.asname or alias.name)
+
+          missing = sorted(called - defined - imported - builtins_set)
+
+          print("=" * 60)
+          print("🔍 АНАЛИЗ ФАЙЛА bot.py")
+          print("=" * 60)
+          print(f"Всего функций/классов определено: {len(defined)}")
+          print(f"Всего вызовов функций: {len(called)}")
+          print(f"Импортировано имён: {len(imported)}")
+          print()
+          if not missing:
+              print("✅ Все вызываемые функции определены или импортированы!")
+          else:
+              print(f"❌ НЕ НАЙДЕНЫ ({len(missing)}):")
+              for name in missing:
+                  print(f"   - {name}")
+          print("=" * 60)
+          EOF

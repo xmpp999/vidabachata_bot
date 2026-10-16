@@ -245,6 +245,7 @@ def load_data():
     except Exception as e:
         print(f"[SUPABASE] Ошибка загрузки: {e}")
 
+
 # ================== ЮKASSA ==================
 def create_yookassa_payment(amount: int, description: str, user_id: int, metadata: dict) -> dict:
     """Создаёт платёж в ЮKassa."""
@@ -1257,6 +1258,7 @@ async def confirm_restart(call: CallbackQuery, state: FSMContext):
     )
     await state.set_state(Reg.phone)
 
+
 # ================== ПАНЕЛЬ CHECKER'А ==================
 async def checker_start(message: Message, state: FSMContext, checker: dict):
     """Панель администратора на входе."""
@@ -2011,6 +2013,636 @@ async def checker_stats(call: CallbackQuery):
     await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
 
 
+# ================== АДМИН ==================
+@dp.message(Command("admin"))
+async def admin_start(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("⛔ Только для админа.")
+        return
+    await state.clear()
+    await show_admin_menu(message, state)
+
+
+async def show_admin_menu(message: Message, state: FSMContext):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Создать событие", callback_data="admin:add")],
+        [InlineKeyboardButton(text="🗑 Удалить событие", callback_data="admin:delete")],
+        [InlineKeyboardButton(text="📋 Список событий", callback_data="admin:list")],
+        [InlineKeyboardButton(text="🎉 Анонсы (просмотр)", callback_data="show_events")],
+        [InlineKeyboardButton(text="📷 Сканировать QR", callback_data="admin:scan_qr")],
+        [InlineKeyboardButton(text="🎫 Админы на входе", callback_data="admin:checkers")],
+        [InlineKeyboardButton(text="👥 Пользователи", callback_data="admin:users:0")],
+        [InlineKeyboardButton(text="🚫 Чёрный список", callback_data="admin:blacklist")],
+        [InlineKeyboardButton(text="📊 Попытки регистрации", callback_data="admin:reg_attempts")],
+        [InlineKeyboardButton(text="📈 Статистика", callback_data="admin:stats")],
+        [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin:broadcast")],
+        [InlineKeyboardButton(text="🎟 Все билеты", callback_data="admin:tickets")],
+        [InlineKeyboardButton(text="🎫 Найти билет", callback_data="admin:find_ticket")],
+        [InlineKeyboardButton(text="📤 Отправить отчёт на email", callback_data="admin:report")],
+    ])
+    await message.answer(
+        f"🛠 <b>Админ-панель</b>\n\n"
+        f"Событий: {len(events)} | Заказов: {len(orders)} | Юзеров: {len(users)}\n"
+        f"ЧС: {len(blacklist)} | Попыток: {len(reg_attempts)} | Checkers: {len(checkers)}",
+        reply_markup=kb, parse_mode="HTML",
+    )
+    await state.set_state(Admin.menu)
+
+
+@dp.callback_query(F.data == "admin:back")
+async def admin_back(call: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await show_admin_menu(call.message, state)
+
+
+@dp.callback_query(F.data == "admin:report")
+async def admin_report(call: CallbackQuery):
+    await call.answer("Отправляю...")
+    await send_report_to_admin()
+    await call.message.answer("📤 Отчёт отправлен на email.")
+
+
+# ================== РАЗДЕЛ «АДМИНЫ НА ВХОДЕ» ==================
+@dp.callback_query(F.data == "admin:checkers")
+async def admin_checkers_menu(call: CallbackQuery, state: FSMContext):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("Только для главного админа", show_alert=True)
+        return
+
+    total = len(checkers)
+    all_events_cnt = sum(1 for c in checkers.values() if c.get("event_id") is None)
+    specific_cnt = total - all_events_cnt
+    active_cnt = sum(1 for c in checkers.values() if c.get("user_id"))
+
+    text = (
+        f"🎫 <b>Админы на входе</b>\n\n"
+        f"Всего: <b>{total}</b>\n"
+        f"🌐 На все вечеринки: <b>{all_events_cnt}</b>\n"
+        f"🎯 На конкретные: <b>{specific_cnt}</b>\n"
+        f"🟢 Активировано: <b>{active_cnt}</b>\n\n"
+        f"Что делаем?"
+    )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Добавить по @username", callback_data="admin:chk:add_username")],
+        [InlineKeyboardButton(text="📱 Добавить по телефону", callback_data="admin:chk:add_phone")],
+        [InlineKeyboardButton(text="📋 Список всех", callback_data="admin:chk:list")],
+        [InlineKeyboardButton(text="🗑 Удалить", callback_data="admin:chk:remove")],
+        [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin:back")],
+    ])
+
+    await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+
+
+@dp.callback_query(F.data == "admin:chk:add_username")
+async def admin_chk_add_username(call: CallbackQuery, state: FSMContext):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("Только для главного админа", show_alert=True)
+        return
+
+    await state.update_data(chk_type="username")
+    await call.message.edit_text(
+        "➕ <b>Добавление админа на входе</b>\n\n"
+        "Шаг 1/3. Отправьте <b>@username</b> (например, @kolya_vhod):\n\n"
+        "Для отмены — /admin",
+        parse_mode="HTML",
+    )
+    await state.set_state(Admin.checker_add_username)
+
+
+@dp.message(Admin.checker_add_username)
+async def admin_chk_save_username(message: Message, state: FSMContext):
+    if message.text == "/admin":
+        await state.clear()
+        await show_admin_menu(message, state)
+        return
+
+    value = message.text.strip()
+    if not value.startswith("@"):
+        value = "@" + value
+
+    if len(value) < 3:
+        await message.answer("❌ Слишком короткий username. Попробуйте ещё раз:")
+        return
+
+    value_clean = value.lstrip("@").lower()
+    for chk_id, c in checkers.items():
+        if c.get("username") == value_clean:
+            await message.answer(
+                f"⚠️ Checker с username {value} уже существует.",
+            )
+            await state.clear()
+            await show_admin_menu(message, state)
+            return
+
+    await state.update_data(chk_value=value)
+    await state.set_state(Admin.checker_add_name)
+    await message.answer(
+        "Шаг 2/3. Отправьте <b>имя</b> checker'а (для отображения):\n\n"
+        "Например: <code>Коля (вход)</code>\n\n"
+        "Или отправьте <code>-</code>, чтобы оставить пустым:",
+        parse_mode="HTML",
+    )
+
+
+@dp.callback_query(F.data == "admin:chk:add_phone")
+async def admin_chk_add_phone(call: CallbackQuery, state: FSMContext):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("Только для главного админа", show_alert=True)
+        return
+
+    await state.update_data(chk_type="phone")
+    await call.message.edit_text(
+        "➕ <b>Добавление админа на входе</b>\n\n"
+        "Шаг 1/3. Отправьте <b>номер телефона</b> (например, +79991234567):\n\n"
+        "Для отмены — /admin",
+        parse_mode="HTML",
+    )
+    await state.set_state(Admin.checker_add_phone)
+
+
+@dp.message(Admin.checker_add_phone)
+async def admin_chk_save_phone(message: Message, state: FSMContext):
+    if message.text == "/admin":
+        await state.clear()
+        await show_admin_menu(message, state)
+        return
+
+    value = message.text.strip()
+    value_clean = value.replace(" ", "").replace("-", "").replace("+", "")
+
+    if len(value_clean) < 10:
+        await message.answer("❌ Слишком короткий номер. Попробуйте ещё раз:")
+        return
+
+    for chk_id, c in checkers.items():
+        existing = (c.get("phone") or "").replace(" ", "").replace("-", "").replace("+", "")
+        if existing == value_clean:
+            await message.answer(
+                f"⚠️ Checker с телефоном {value} уже существует.",
+            )
+            await state.clear()
+            await show_admin_menu(message, state)
+            return
+
+    await state.update_data(chk_value=value)
+    await state.set_state(Admin.checker_add_name)
+    await message.answer(
+        "Шаг 2/3. Отправьте <b>имя</b> checker'а (для отображения):\n\n"
+        "Например: <code>Коля (вход)</code>\n\n"
+        "Или отправьте <code>-</code>, чтобы оставить пустым:",
+        parse_mode="HTML",
+    )
+
+
+@dp.message(Admin.checker_add_name)
+async def admin_chk_save_name(message: Message, state: FSMContext):
+    if message.text == "/admin":
+        await state.clear()
+        await show_admin_menu(message, state)
+        return
+
+    name = message.text.strip()
+    if name == "-":
+        name = ""
+
+    await state.update_data(chk_name=name)
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="🌐 Все вечеринки",
+            callback_data="admin:chk:access:all"
+        )],
+        [InlineKeyboardButton(
+            text="🎯 Конкретная вечеринка",
+            callback_data="admin:chk:access:specific"
+        )],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="admin:checkers")],
+    ])
+    await message.answer(
+        "Шаг 3/3. Выберите <b>область доступа</b>:",
+        reply_markup=kb, parse_mode="HTML",
+    )
+    await state.set_state(Admin.checker_choose_event)
+
+
+@dp.callback_query(F.data == "admin:chk:access:all")
+async def admin_chk_access_all(call: CallbackQuery, state: FSMContext):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("Только для главного админа", show_alert=True)
+        return
+
+    data = await state.get_data()
+    await finish_add_checker(call, state, event_id=None, data=data)
+
+
+@dp.callback_query(F.data == "admin:chk:access:specific")
+async def admin_chk_access_specific(call: CallbackQuery, state: FSMContext):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("Только для главного админа", show_alert=True)
+        return
+
+    if not events:
+        await call.answer("Нет событий. Сначала создайте событие.", show_alert=True)
+        return
+
+    buttons = []
+    for e in events:
+        buttons.append([InlineKeyboardButton(
+            text=f"🎉 {e['title']} — {e['date_text']}",
+            callback_data=f"admin:chk:ev:{e['id']}"
+        )])
+    buttons.append([InlineKeyboardButton(text="❌ Отмена", callback_data="admin:checkers")])
+
+    await call.message.edit_text(
+        "🎯 Выберите <b>событие</b>, к которому даёте доступ:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+        parse_mode="HTML",
+    )
+
+
+@dp.callback_query(F.data.startswith("admin:chk:ev:"))
+async def admin_chk_choose_event(call: CallbackQuery, state: FSMContext):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("Только для главного админа", show_alert=True)
+        return
+
+    event_id = call.data.split(":", 3)[3]
+    data = await state.get_data()
+    await finish_add_checker(call, state, event_id=event_id, data=data)
+
+
+async def finish_add_checker(call: CallbackQuery, state: FSMContext, event_id: Optional[str], data: dict):
+    """Завершает добавление checker'а."""
+    chk_type = data.get("chk_type", "username")
+    chk_value = data.get("chk_value", "")
+    chk_name = data.get("chk_name", "")
+
+    if not chk_value:
+        await call.answer("Ошибка: нет значения", show_alert=True)
+        await state.clear()
+        return
+
+    chk_id = f"chk_{uuid.uuid4().hex[:8]}"
+
+    new_checker = {
+        "id": chk_id,
+        "user_id": None,
+        "username": chk_value.lstrip("@").lower() if chk_type == "username" else "",
+        "phone": chk_value if chk_type == "phone" else "",
+        "name": chk_name,
+        "event_id": event_id,
+        "added_by": ADMIN_ID,
+        "added_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "active": True,
+    }
+
+    checkers[chk_id] = new_checker
+    save_data()
+
+    if event_id is None:
+        access_text = "🌐 Все вечеринки"
+    else:
+        ev = next((e for e in events if str(e["id"]) == str(event_id)), None)
+        access_text = f"🎯 {ev['title']} — {ev['date_text']}" if ev else f"🎯 Событие {event_id}"
+
+    if chk_type == "username":
+        value_text = f"🔗 @{new_checker['username']}"
+    else:
+        value_text = f"📱 {new_checker['phone']}"
+
+    name_text = new_checker['name'] or "—"
+
+    await state.clear()
+
+    await call.message.edit_text(
+        f"✅ <b>Админ на входе добавлен!</b>\n\n"
+        f"👤 {name_text}\n"
+        f"{value_text}\n"
+        f"Область: {access_text}\n\n"
+        f"<i>Он активируется, когда напишет /start боту "
+        f"или поделится контактом (если добавлен по телефону).</i>",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="⬅️ К списку админов", callback_data="admin:checkers")
+        ]]),
+    )
+
+
+@dp.callback_query(F.data == "admin:chk:list")
+async def admin_chk_list(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("Только для главного админа", show_alert=True)
+        return
+
+    if not checkers:
+        await call.message.edit_text(
+            "📭 Нет админов на входе.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="⬅️ Назад", callback_data="admin:checkers")
+            ]]),
+        )
+        return
+
+    text = f"📋 <b>Админы на входе</b> ({len(checkers)})\n\n"
+    for chk_id, c in checkers.items():
+        if c.get("user_id"):
+            status_icon = "🟢"
+        else:
+            status_icon = "🟡"
+
+        name = c.get("name") or "—"
+        if c.get("username"):
+            value = f"🔗 @{c['username']}"
+        elif c.get("phone"):
+            value = f"📱 {c['phone']}"
+        else:
+            value = "—"
+
+        if c.get("event_id") is None:
+            access = "🌐 Все вечеринки"
+        else:
+            ev = next((e for e in events if str(e["id"]) == str(c["event_id"])), None)
+            access = f"🎯 {ev['title']}" if ev else f"🎯 {c['event_id']}"
+
+        text += (
+            f"{status_icon} <b>{name}</b>\n"
+            f"   {value}\n"
+            f"   {access}\n\n"
+        )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data="admin:chk:list")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin:checkers")],
+    ])
+    await call.message.edit_text(text[:4000], reply_markup=kb, parse_mode="HTML")
+
+
+@dp.callback_query(F.data == "admin:chk:remove")
+async def admin_chk_remove_start(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("Только для главного админа", show_alert=True)
+        return
+
+    if not checkers:
+        await call.answer("Список пуст", show_alert=True)
+        return
+
+    buttons = []
+    for chk_id, c in checkers.items():
+        name = c.get("name") or "—"
+        if c.get("username"):
+            value = f"@{c['username']}"
+        elif c.get("phone"):
+            value = c["phone"]
+        else:
+            value = "—"
+        buttons.append([InlineKeyboardButton(
+            text=f"🗑 {name} — {value}",
+            callback_data=f"admin:chk:del:{chk_id}"
+        )])
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="admin:checkers")])
+
+    await call.message.edit_text(
+        "🗑 Выберите админа для удаления:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+    )
+
+
+@dp.callback_query(F.data.startswith("admin:chk:del:"))
+async def admin_chk_remove_confirm(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("Только для главного админа", show_alert=True)
+        return
+
+    chk_id = call.data.split(":", 3)[3]
+    if chk_id not in checkers:
+        await call.answer("Не найден", show_alert=True)
+        return
+
+    removed = checkers.pop(chk_id)
+    save_data()
+
+    name = removed.get("name") or "—"
+    await call.answer(f"Удалён: {name}")
+    await admin_checkers_menu(call, None)
+
+
+# ================== СОЗДАНИЕ СОБЫТИЙ ==================
+@dp.callback_query(F.data == "admin:add")
+async def admin_add_start(call: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await state.set_state(Admin.add_title)
+    await call.message.edit_text(
+        "➕ <b>Новое событие</b>\n\n"
+        "Шаг 1/7. Введите <b>название</b> события:",
+        parse_mode="HTML",
+    )
+
+
+@dp.message(Admin.add_title)
+async def add_title(message: Message, state: FSMContext):
+    await state.update_data(title=message.text.strip())
+    await state.set_state(Admin.add_date_text)
+    await message.answer(
+        "Шаг 2/7. Введите <b>дату и время</b> события в любой удобной форме:\n\n"
+        "Например:\n"
+        "• <code>15.11.2026 22:00</code>\n"
+        "• <code>15/11/2026 22:00</code>\n"
+        "• <code>15 ноября 2026, 22:00</code>\n"
+        "• <code>15 ноября 22:00</code>",
+        parse_mode="HTML",
+    )
+
+
+@dp.message(Admin.add_date_text)
+async def add_date_text(message: Message, state: FSMContext):
+    text = message.text.strip()
+    dt, date_text = parse_event_date(text)
+
+    if dt is None:
+        await message.answer(
+            "❌ Не могу распознать дату.\n\n"
+            "Попробуй один из форматов:\n"
+            "• <code>15.11.2026 22:00</code>\n"
+            "• <code>15/11/2026 22:00</code>\n"
+            "• <code>15 ноября 2026, 22:00</code>\n"
+            "• <code>15 ноября 22:00</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    if dt < datetime.now():
+        await message.answer("❌ Дата уже в прошлом. Введи будущую дату.")
+        return
+
+    await state.update_data(start_dt=dt.isoformat(), date_text=date_text)
+    await state.set_state(Admin.add_place)
+    await message.answer(
+        f"✅ Распознано: <b>{date_text}</b>\n\n"
+        f"Шаг 3/7. Место проведения:",
+        parse_mode="HTML",
+    )
+
+
+@dp.message(Admin.add_place)
+async def add_place(message: Message, state: FSMContext):
+    await state.update_data(place=message.text.strip())
+    await state.set_state(Admin.add_description)
+    await message.answer("Шаг 4/7. Описание:")
+
+
+@dp.message(Admin.add_description)
+async def add_description(message: Message, state: FSMContext):
+    await state.update_data(description=message.text.strip())
+    await state.set_state(Admin.add_price_single)
+    await message.answer("Шаг 5/7. Цена обычного (число):")
+
+
+@dp.message(Admin.add_price_single)
+async def add_price_single(message: Message, state: FSMContext):
+    try:
+        price = int(message.text.strip())
+        if price <= 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("❌ Число > 0")
+        return
+    await state.update_data(price_single=price)
+    await state.set_state(Admin.add_price_pair)
+    await message.answer("Шаг 6/7. Цена парного (0 если нет):")
+
+
+@dp.message(Admin.add_price_pair)
+async def add_price_pair(message: Message, state: FSMContext):
+    try:
+        price = int(message.text.strip())
+        if price < 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("❌ Число ≥ 0")
+        return
+    await state.update_data(price_pair=price)
+    await state.set_state(Admin.add_photo)
+    await message.answer("Шаг 7/7. Фото-обложка или <code>-</code>:", parse_mode="HTML")
+
+
+@dp.message(Admin.add_photo, F.photo)
+async def add_photo(message: Message, state: FSMContext):
+    await state.update_data(photo_id=message.photo[-1].file_id)
+    await finish_add_event(message, state)
+
+
+@dp.message(Admin.add_photo, F.text == "-")
+async def add_photo_skip(message: Message, state: FSMContext):
+    await state.update_data(photo_id=None)
+    await finish_add_event(message, state)
+
+
+async def finish_add_event(message: Message, state: FSMContext):
+    data = await state.get_data()
+    event_id = f"evt_{uuid.uuid4().hex[:8]}"
+    event = {
+        "id": event_id,
+        "title": data["title"],
+        "date_text": data["date_text"],
+        "start_dt": data["start_dt"],
+        "place": data["place"],
+        "description": data["description"],
+        "price_single": data["price_single"],
+        "price_pair": data["price_pair"],
+        "photo_id": data.get("photo_id"),
+        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "active": True,
+    }
+    events.append(event)
+    save_data()
+    await state.clear()
+    await message.answer(f"✅ Событие «{data['title']}» добавлено!")
+
+
+@dp.callback_query(F.data == "admin:list")
+async def admin_list(call: CallbackQuery):
+    if not events:
+        await call.message.edit_text("📭 Нет событий.")
+        return
+    text = "📋 <b>События:</b>\n\n"
+    for e in events:
+        status = "🟢" if e.get("active") else "🔴"
+        text += f"{status} <b>{e['title']}</b>\n   📅 {e['date_text']}\n   🆔 <code>{e['id']}</code>\n\n"
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data="admin:list")],
+        [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin:back")],
+    ])
+    await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+
+
+@dp.callback_query(F.data == "admin:delete")
+async def admin_delete(call: CallbackQuery, state: FSMContext):
+    if not events:
+        await call.message.edit_text("📭 Нет событий.")
+        return
+    buttons = []
+    for e in events:
+        buttons.append([InlineKeyboardButton(
+            text=f"🗑 {e['title']} — {e['date_text']}",
+            callback_data=f"admin:del:{e['id']}"
+        )])
+    buttons.append([InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin:back")])
+    await call.message.edit_text(
+        "🗑 Выберите событие для удаления:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+    )
+
+
+@dp.callback_query(F.data.startswith("admin:del:"))
+async def admin_delete_confirm(call: CallbackQuery, state: FSMContext):
+    eid = call.data.split(":")[2]
+    events[:] = [e for e in events if e["id"] != eid]
+    supabase.table("events").delete().eq("id", eid).execute()
+    await call.message.edit_text("✅ Удалено.")
+    await show_admin_menu(call.message, state)
+
+
+@dp.callback_query(F.data == "admin:stats")
+async def admin_stats(call: CallbackQuery):
+    total_revenue = sum(o["price"] for o in orders)
+    paid_orders = len(orders)
+    tickets_active = sum(1 for t in tickets.values() if not t.get("used"))
+    tickets_used = sum(1 for t in tickets.values() if t.get("used"))
+
+    by_event = {}
+    for o in orders:
+        title = o.get("event_title", "—")
+        by_event.setdefault(title, {"count": 0, "sum": 0})
+        by_event[title]["count"] += 1
+        by_event[title]["sum"] += o["price"]
+
+    text = (
+        f"📊 <b>Статистика</b>\n\n"
+        f"👥 Пользователей: <b>{len(users)}</b>\n"
+        f"🎉 Событий: <b>{len(events)}</b>\n"
+        f"🛒 Заказов: <b>{paid_orders}</b>\n"
+        f"💰 Выручка: <b>{total_revenue} ₽</b>\n\n"
+        f"🟢 Билетов активно: <b>{tickets_active}</b>\n"
+        f"🔴 Билетов использовано: <b>{tickets_used}</b>\n"
+        f"🚫 В ЧС: <b>{len(blacklist)}</b>\n"
+        f"📊 Попыток рег.: <b>{len(reg_attempts)}</b>\n"
+        f"🎫 Checkers: <b>{len(checkers)}</b>\n"
+    )
+
+    if by_event:
+        text += "\n<b>Продажи по событиям:</b>\n"
+        for title, info in by_event.items():
+            text += f"• {title}: {info['count']} шт, {info['sum']} ₽\n"
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data="admin:stats")],
+        [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin:back")],
+    ])
+    await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+
+
 # ================== ЧЁРНЫЙ СПИСОК (АДМИН) ==================
 @dp.callback_query(F.data == "admin:blacklist")
 async def admin_blacklist_menu(call: CallbackQuery):
@@ -2504,6 +3136,7 @@ async def admin_tickets_csv(call: CallbackQuery):
     )
     await call.answer()
 
+
 # ================== МЕРОПРИЯТИЯ (КЛИЕНТ) ==================
 @dp.callback_query(F.data == "show_events")
 async def show_events(call: CallbackQuery):
@@ -2857,6 +3490,7 @@ async def show_my_ticket_qr(call: CallbackQuery):
         parse_mode="HTML",
     )
     await call.answer()
+
 
 # ================== ВЫБОР СОБЫТИЯ КЛИЕНТОМ ==================
 @dp.callback_query(F.data.startswith("event:"))

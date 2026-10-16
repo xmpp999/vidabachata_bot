@@ -211,6 +211,7 @@ def delete_checker(chk_id: str):
         print(f"[SUPABASE] delete_checker({chk_id}) ошибка: {e}")
 
 
+
 def save_data():
     """
     Аварийное полное сохранение (только при старте/миграции).
@@ -396,6 +397,8 @@ def load_data():
         print(f"[SUPABASE] Ошибка загрузки: {e}")
 
 
+
+
 # ================== ЮKASSA ==================
 def create_yookassa_payment(amount: int, description: str, user_id: int, metadata: dict) -> dict:
     """Создаёт платёж в ЮKassa."""
@@ -453,7 +456,6 @@ def verify_payment_with_yookassa(payment_id: str) -> bool:
     except Exception as e:
         print(f"[YOOKASSA] Ошибка верификации платежа {payment_id}: {e}")
         return False
-
 
 
 # ================== ЧЁРНЫЙ СПИСОК ==================
@@ -610,6 +612,8 @@ def get_reg_attempts_text(limit: int = 30) -> str:
             text += f"   └ причина: {a.get('reason')}\n"
 
     return text
+
+
 
 
 # ================== УТИЛИТЫ ==================
@@ -783,6 +787,7 @@ def get_ticket_status_icon(ticket: dict) -> str:
     if ticket.get("used"):
         return "🔴"
     return "🟢"
+
 
 
 
@@ -1026,6 +1031,7 @@ class CheckerStates(StatesGroup):
     menu = State()
     find_code = State()
     find_name = State()
+
 
 
 
@@ -1399,6 +1405,7 @@ async def confirm_restart(call: CallbackQuery, state: FSMContext):
 
 
 
+
 # ================== ПАНЕЛЬ CHECKER'А ==================
 async def checker_start(message: Message, state: FSMContext, checker: dict):
     """Панель администратора на входе."""
@@ -1734,6 +1741,7 @@ async def show_checker_ticket_card(message: Message, code: str, ticket: dict):
 @dp.callback_query(F.data == "checker:noop")
 async def checker_noop(call: CallbackQuery):
     await call.answer("Этот билет уже недействителен", show_alert=True)
+
 
 
 
@@ -2078,6 +2086,7 @@ async def checker_stats(call: CallbackQuery):
     ])
 
     await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+
 
 
 
@@ -2571,6 +2580,7 @@ async def admin_chk_remove_confirm(call: CallbackQuery):
 
 
 
+
 # ================== СОЗДАНИЕ СОБЫТИЙ ==================
 @dp.callback_query(F.data == "admin:add")
 async def admin_add_start(call: CallbackQuery, state: FSMContext):
@@ -2731,18 +2741,26 @@ async def admin_list(call: CallbackQuery):
         for e in active:
             ev_tickets = [t for t in tickets.values() if str(t.get("event_id")) == str(e["id"])]
             total = len(ev_tickets)
+            active_cnt = sum(1 for t in ev_tickets if not t.get("used") and not t.get("auto_used"))
+            used_cnt = sum(1 for t in ev_tickets if t.get("used") and not t.get("auto_used"))
             text += (
                 f"🟢 <b>{e['title']}</b>\n"
                 f"   📅 {e['date_text']}\n"
-                f"   🎫 Билетов: {total}\n"
-                f"   🆔 <code>{e['id']}</code>\n\n"
+                f"   🎫 Билетов: {total} (🟢{active_cnt} 🔴{used_cnt})\n\n"
             )
 
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔄 Обновить", callback_data="admin:list")],
-        [InlineKeyboardButton(text="📦 Архив событий", callback_data="admin:archive")],
-        [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin:back")],
-    ])
+    buttons = []
+    for e in active:
+        cnt = sum(1 for t in tickets.values() if str(t.get("event_id")) == str(e["id"]))
+        buttons.append([InlineKeyboardButton(
+            text=f"🎟 {e['title'][:35]} ({cnt})",
+            callback_data=f"admin:event_tickets:{e['id']}:all:0"
+        )])
+    buttons.append([InlineKeyboardButton(text="🔄 Обновить", callback_data="admin:list")])
+    buttons.append([InlineKeyboardButton(text="📦 Архив событий", callback_data="admin:archive")])
+    buttons.append([InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin:back")])
+
+    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
     await call.message.edit_text(text[:4000], reply_markup=kb, parse_mode="HTML")
 
 
@@ -2831,6 +2849,291 @@ async def admin_delete_arch_confirm(call: CallbackQuery, state: FSMContext):
     supabase.table("events").delete().eq("id", eid).execute()
     await call.message.edit_text("✅ Удалено из архива.")
     await show_admin_menu(call.message, state)
+
+
+
+
+# ================== БИЛЕТЫ ПО СОБЫТИЮ (ГЛАВНЫЙ ЭКРАН) ==================
+
+TICKETS_BY_EVENT_PAGE_SIZE = 15
+
+
+def _build_event_tickets_text(event: dict, filtered: list, filter_mode: str, page: int):
+    """Собирает текст и кнопки для экрана билетов события."""
+    total_pages = max(1, (len(filtered) + TICKETS_BY_EVENT_PAGE_SIZE - 1) // TICKETS_BY_EVENT_PAGE_SIZE)
+    if page < 0:
+        page = 0
+    if page >= total_pages:
+        page = total_pages - 1
+
+    start = page * TICKETS_BY_EVENT_PAGE_SIZE
+    end = start + TICKETS_BY_EVENT_PAGE_SIZE
+    page_items = filtered[start:end]
+
+    # Общая статистика по событию
+    all_event_tickets = [
+        (c, t) for c, t in tickets.items()
+        if str(t.get("event_id")) == str(event["id"])
+    ]
+    total = len(all_event_tickets)
+    active = sum(1 for _, t in all_event_tickets if not t.get("used") and not t.get("auto_used"))
+    used = sum(1 for _, t in all_event_tickets if t.get("used") and not t.get("auto_used"))
+    burned = sum(1 for _, t in all_event_tickets if t.get("auto_used"))
+    revenue = sum(
+        int(o.get("price", 0))
+        for o in orders
+        if str(o.get("event_id")) == str(event["id"])
+    )
+
+    filter_labels = {
+        "all": "все",
+        "active": "🟢 активные",
+        "used": "🔴 погашенные",
+        "burned": "⚪ сгоревшие",
+    }
+    filter_label = filter_labels.get(filter_mode, "все")
+
+    text = (
+        f"🎟 <b>{event['title']}</b>\n"
+        f"📅 {event['date_text']}\n"
+        f"📍 {event.get('place', '—')}\n\n"
+        f"Всего: <b>{total}</b>\n"
+        f"🟢 Активных: <b>{active}</b>\n"
+        f"🔴 Погашено: <b>{used}</b>\n"
+        f"⚪ Сгорело: <b>{burned}</b>\n"
+        f"💰 Выручка: <b>{revenue} ₽</b>\n\n"
+        f"Фильтр: <b>{filter_label}</b> · Найдено: <b>{len(filtered)}</b>\n"
+        f"Страница {page + 1}/{total_pages}\n\n"
+    )
+
+    if not page_items:
+        text += "📭 Билетов по фильтру нет.\n"
+    else:
+        for code, t in page_items:
+            # Статус
+            if t.get("auto_used"):
+                status = "⚪ сгорел"
+            elif t.get("used"):
+                status = "🔴 погашен"
+            else:
+                status = "🟢 активен"
+
+            # Имя
+            holder = t.get("holder", "—")
+
+            # Телефон и username
+            owner = users.get(t.get("user_id"), {})
+            phone = owner.get("phone") or "—"
+            username = owner.get("username") or ""
+
+            # Дата покупки
+            issued_at = t.get("issued_at", "—")
+
+            # Кто погасил
+            used_by = t.get("used_by") or ""
+
+            # Цена
+            price = 0
+            for o in orders:
+                if (str(o.get("user_id")) == str(t.get("user_id"))
+                        and str(o.get("event_id")) == str(t.get("event_id"))):
+                    try:
+                        price = int(o.get("price", 0) or 0)
+                    except (TypeError, ValueError):
+                        price = 0
+                    break
+
+            # Тип
+            type_label = "Парный" if t.get("type") == "pair" else "Обычный"
+
+            text += (
+                f"{status} · <code>{code}</code>\n"
+                f"   👤 {holder}"
+            )
+            if username:
+                text += f" (@{username})"
+            text += "\n"
+            text += f"   📱 {phone}\n"
+            text += f"   🎟 {type_label} · 💰 {price} ₽\n"
+            text += f"   🛒 Куплен: {issued_at}\n"
+            if used_by:
+                text += f"   👮 Погасил: {used_by}\n"
+            text += "\n"
+
+    # Кнопки
+    buttons = []
+
+    # Фильтры
+    buttons.append([
+        InlineKeyboardButton(
+            text="🟢 Активные" if filter_mode != "active" else "· 🟢 Активные ·",
+            callback_data=f"admin:event_tickets:{event['id']}:active:0"
+        ),
+        InlineKeyboardButton(
+            text="🔴 Погашенные" if filter_mode != "used" else "· 🔴 Погашенные ·",
+            callback_data=f"admin:event_tickets:{event['id']}:used:0"
+        ),
+    ])
+    buttons.append([
+        InlineKeyboardButton(
+            text="⚪ Сгоревшие" if filter_mode != "burned" else "· ⚪ Сгоревшие ·",
+            callback_data=f"admin:event_tickets:{event['id']}:burned:0"
+        ),
+        InlineKeyboardButton(
+            text="📋 Все" if filter_mode != "all" else "· 📋 Все ·",
+            callback_data=f"admin:event_tickets:{event['id']}:all:0"
+        ),
+    ])
+
+    # Пагинация
+    if total_pages > 1:
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton(
+                text="⬅️",
+                callback_data=f"admin:event_tickets:{event['id']}:{filter_mode}:{page-1}"
+            ))
+        nav.append(InlineKeyboardButton(
+            text=f"{page+1}/{total_pages}",
+            callback_data="admin:noop"
+        ))
+        if page < total_pages - 1:
+            nav.append(InlineKeyboardButton(
+                text="➡️",
+                callback_data=f"admin:event_tickets:{event['id']}:{filter_mode}:{page+1}"
+            ))
+        buttons.append(nav)
+
+    # Действия
+    buttons.append([
+        InlineKeyboardButton(
+            text="📥 XLSX",
+            callback_data=f"admin:export_event_xlsx:{event['id']}:{filter_mode}"
+        ),
+        InlineKeyboardButton(
+            text="📄 PDF",
+            callback_data=f"admin:export_event_pdf:{event['id']}:{filter_mode}"
+        ),
+    ])
+    buttons.append([InlineKeyboardButton(
+        text="⬅️ К событиям", callback_data="admin:list"
+    )])
+    buttons.append([InlineKeyboardButton(
+        text="🏠 На главную", callback_data="main_menu"
+    )])
+
+    return text, buttons, total_pages
+
+
+@dp.callback_query(F.data.startswith("admin:event_tickets:"))
+async def admin_event_tickets(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("Только для админа", show_alert=True)
+        return
+
+    parts = call.data.split(":")
+    try:
+        event_id = parts[2]
+    except IndexError:
+        await call.answer("Ошибка данных", show_alert=True)
+        return
+
+    filter_mode = parts[3] if len(parts) > 3 else "all"
+    page = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 0
+
+    event = next((e for e in events if str(e["id"]) == str(event_id)), None)
+    if not event:
+        await call.answer("Событие не найдено", show_alert=True)
+        return
+
+    # Все билеты события
+    all_event_tickets = [
+        (c, t) for c, t in tickets.items()
+        if str(t.get("event_id")) == str(event_id)
+    ]
+
+    # Фильтр
+    if filter_mode == "active":
+        filtered = [(c, t) for c, t in all_event_tickets
+                    if not t.get("used") and not t.get("auto_used")]
+    elif filter_mode == "used":
+        filtered = [(c, t) for c, t in all_event_tickets
+                    if t.get("used") and not t.get("auto_used")]
+    elif filter_mode == "burned":
+        filtered = [(c, t) for c, t in all_event_tickets
+                    if t.get("auto_used")]
+    else:
+        filtered = all_event_tickets
+
+    # Сортировка: сначала активные, потом погашенные, потом сгоревшие
+    def sort_key(kv):
+        _, t = kv
+        if t.get("auto_used"):
+            return (2, t.get("used_at", ""))
+        if t.get("used"):
+            return (1, t.get("used_at", ""))
+        return (0, t.get("issued_at", ""))
+
+    filtered.sort(key=sort_key, reverse=False)
+
+    text, buttons, _ = _build_event_tickets_text(event, filtered, filter_mode, page)
+
+    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+    try:
+        await call.message.edit_text(text[:4000], reply_markup=kb, parse_mode="HTML")
+    except Exception:
+        await call.message.answer(text[:4000], reply_markup=kb, parse_mode="HTML")
+    await call.answer()
+
+
+@dp.callback_query(F.data == "admin:tickets_by_event")
+async def admin_tickets_by_event(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("Только для админа", show_alert=True)
+        return
+
+    if not events:
+        await call.message.edit_text(
+            "📭 Событий пока нет.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin:back")]
+            ]),
+        )
+        return
+
+    # Активные + архивные
+    buttons = []
+    active = get_active_events()
+    archived = get_archived_events()
+
+    text = "🎯 <b>Билеты по событиям</b>\n\n"
+    text += "Выберите событие:\n\n"
+
+    if active:
+        for e in active:
+            cnt = sum(1 for t in tickets.values() if str(t.get("event_id")) == str(e["id"]))
+            buttons.append([InlineKeyboardButton(
+                text=f"🟢 {e['title'][:30]} — {e['date_text'][:12]} (🎟{cnt})",
+                callback_data=f"admin:event_tickets:{e['id']}:all:0"
+            )])
+
+    if archived:
+        archived_sorted = sorted(archived, key=lambda e: e.get("start_dt", ""), reverse=True)
+        for e in archived_sorted:
+            cnt = sum(1 for t in tickets.values() if str(t.get("event_id")) == str(e["id"]))
+            buttons.append([InlineKeyboardButton(
+                text=f"📦 {e['title'][:30]} — {e['date_text'][:12]} (🎟{cnt})",
+                callback_data=f"admin:event_tickets:{e['id']}:all:0"
+            )])
+
+    buttons.append([InlineKeyboardButton(text="⬅️ К билетам", callback_data="admin:tickets:0")])
+    buttons.append([InlineKeyboardButton(text="🏠 На главную", callback_data="main_menu")])
+
+    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+    await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await call.answer()
+
+
 
 
 # ================== СТАТИСТИКА (АДМИН) ==================
@@ -3152,6 +3455,7 @@ async def admin_tickets(call: CallbackQuery):
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         nav,
+        [InlineKeyboardButton(text="🎯 По событиям", callback_data="admin:tickets_by_event")],
         [InlineKeyboardButton(text="🔄 Обновить", callback_data=f"admin:tickets:{page}")],
         [InlineKeyboardButton(text="📥 Скачать CSV", callback_data="admin:tickets_csv")],
         [InlineKeyboardButton(text="📤 Выгрузка билетов", callback_data="admin:export")],
@@ -3283,6 +3587,8 @@ async def admin_archived_tickets_csv(call: CallbackQuery):
         caption=f"📦 Архив билетов ({len(rows)})",
     )
     await call.answer()
+
+
 
 
 
@@ -3457,7 +3763,154 @@ def _apply_filter(mode: str) -> list:
     return list(tickets.items())
 
 
-# ================== МЕНЮ ЭКСПОРТА ==================
+# ================== ЭКСПОРТ ПО СОБЫТИЮ (с фильтром) ==================
+
+def _get_event_filtered(event_id: str, filter_mode: str) -> list:
+    """Возвращает билеты события по фильтру."""
+    all_event_tickets = [
+        (c, t) for c, t in tickets.items()
+        if str(t.get("event_id")) == str(event_id)
+    ]
+
+    if filter_mode == "active":
+        return [(c, t) for c, t in all_event_tickets
+                if not t.get("used") and not t.get("auto_used")]
+    elif filter_mode == "used":
+        return [(c, t) for c, t in all_event_tickets
+                if t.get("used") and not t.get("auto_used")]
+    elif filter_mode == "burned":
+        return [(c, t) for c, t in all_event_tickets
+                if t.get("auto_used")]
+    else:
+        return all_event_tickets
+
+
+def _safe_filename(text: str, max_len: int = 30) -> str:
+    """Безопасное имя файла из названия события."""
+    safe = "".join(c for c in text if c.isalnum() or c in " -_")
+    safe = safe.strip().replace(" ", "_")
+    return safe[:max_len] if safe else "event"
+
+
+@dp.callback_query(F.data.startswith("admin:export_event_xlsx:"))
+async def admin_export_event_xlsx(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("Только для админа", show_alert=True)
+        return
+
+    parts = call.data.split(":")
+    try:
+        event_id = parts[1]
+    except IndexError:
+        await call.answer("Ошибка данных", show_alert=True)
+        return
+
+    filter_mode = parts[2] if len(parts) > 2 else "all"
+
+    event = next((e for e in events if str(e["id"]) == str(event_id)), None)
+    if not event:
+        await call.answer("Событие не найдено", show_alert=True)
+        return
+
+    filtered = _get_event_filtered(event_id, filter_mode)
+
+    if not filtered:
+        await call.answer("Нет билетов по фильтру", show_alert=True)
+        return
+
+    def sort_key(kv):
+        _, t = kv
+        if t.get("auto_used"):
+            return (2, t.get("used_at", ""))
+        if t.get("used"):
+            return (1, t.get("used_at", ""))
+        return (0, t.get("issued_at", ""))
+
+    filtered.sort(key=sort_key)
+
+    filter_labels = {
+        "all": "все",
+        "active": "активные",
+        "used": "погашенные",
+        "burned": "сгоревшие",
+    }
+    filter_label = filter_labels.get(filter_mode, "все")
+
+    rows = _export_tickets_data(filtered)
+    xlsx_bytes = make_xlsx(_tickets_headers(), rows)
+
+    safe_name = _safe_filename(event['title'])
+    filename = f"tickets_{safe_name}_{filter_mode}.xlsx"
+
+    await call.message.answer_document(
+        BufferedInputFile(xlsx_bytes, filename=filename),
+        caption=f"📊 Excel: {len(filtered)} билетов · {event['title']} ({filter_label})",
+    )
+    await call.answer()
+
+
+@dp.callback_query(F.data.startswith("admin:export_event_pdf:"))
+async def admin_export_event_pdf(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("Только для админа", show_alert=True)
+        return
+
+    parts = call.data.split(":")
+    try:
+        event_id = parts[1]
+    except IndexError:
+        await call.answer("Ошибка данных", show_alert=True)
+        return
+
+    filter_mode = parts[2] if len(parts) > 2 else "all"
+
+    event = next((e for e in events if str(e["id"]) == str(event_id)), None)
+    if not event:
+        await call.answer("Событие не найдено", show_alert=True)
+        return
+
+    filtered = _get_event_filtered(event_id, filter_mode)
+
+    if not filtered:
+        await call.answer("Нет билетов по фильтру", show_alert=True)
+        return
+
+    def sort_key(kv):
+        _, t = kv
+        if t.get("auto_used"):
+            return (2, t.get("used_at", ""))
+        if t.get("used"):
+            return (1, t.get("used_at", ""))
+        return (0, t.get("issued_at", ""))
+
+    filtered.sort(key=sort_key)
+
+    filter_labels = {
+        "all": "все",
+        "active": "активные",
+        "used": "погашенные",
+        "burned": "сгоревшие",
+    }
+    filter_label = filter_labels.get(filter_mode, "все")
+
+    pdf_title = f"{event['title']} ({filter_label})"
+    if event.get("date_text"):
+        pdf_title += f" — {event['date_text']}"
+
+    rows = _export_tickets_data(filtered)
+    pdf_bytes = make_pdf(_tickets_headers(), rows, title=pdf_title)
+
+    safe_name = _safe_filename(event['title'])
+    filename = f"tickets_{safe_name}_{filter_mode}.pdf"
+
+    await call.message.answer_document(
+        BufferedInputFile(pdf_bytes, filename=filename),
+        caption=f"📄 PDF: {len(filtered)} билетов · {event['title']} ({filter_label})",
+    )
+    await call.answer()
+
+
+# ================== МЕНЮ ЭКСПОРТА (общее) ==================
 @dp.callback_query(F.data == "admin:export")
 async def admin_export_menu(call: CallbackQuery):
     if call.from_user.id != ADMIN_ID:
@@ -3660,6 +4113,9 @@ async def admin_export_csv_filtered(call: CallbackQuery):
     await call.answer()
 
 
+
+
+
 # ================== ЧЁРНЫЙ СПИСОК (АДМИН) ==================
 @dp.callback_query(F.data == "admin:blacklist")
 async def admin_blacklist_menu(call: CallbackQuery):
@@ -3799,7 +4255,6 @@ async def admin_reg_attempts(call: CallbackQuery):
         [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin:back")],
     ])
     await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
-
 
 
 # ================== МЕРОПРИЯТИЯ (КЛИЕНТ) ==================
@@ -3988,6 +4443,8 @@ async def my_tickets_archive(call: CallbackQuery):
     ])
 
     await call.message.answer(text[:4000], reply_markup=kb, parse_mode="HTML")
+
+
 
 
 # ================== ОТПРАВКА БИЛЕТА НА ВХОД ==================
@@ -4242,7 +4699,6 @@ async def show_my_ticket_qr(call: CallbackQuery):
     await call.answer()
 
 
-
 # ================== ВЫБОР СОБЫТИЯ КЛИЕНТОМ ==================
 @dp.callback_query(F.data.startswith("event:"))
 async def event_selected(call: CallbackQuery, state: FSMContext):
@@ -4432,6 +4888,8 @@ async def cancel_order(call: CallbackQuery, state: FSMContext):
     await call.message.edit_text("❌ Отменено. /start — заново.")
 
 
+
+
 # ================== ВЫДАЧА БИЛЕТА ==================
 async def issue_ticket(user_id: int, code: str, ticket_type: str, holder_name: str, event: dict):
     tickets[code] = {
@@ -4473,8 +4931,8 @@ async def issue_ticket(user_id: int, code: str, ticket_type: str, holder_name: s
     )
 
     kb_ticket = InlineKeyboardMarkup(inline_keyboard=[[
-    InlineKeyboardButton(text="🎟 Мои билеты", callback_data="my_tickets"),
-    InlineKeyboardButton(text="🏠 На главную", callback_data="main_menu"),
+        InlineKeyboardButton(text="🎟 Мои билеты", callback_data="my_tickets"),
+        InlineKeyboardButton(text="🏠 На главную", callback_data="main_menu"),
     ]])
 
     try:
@@ -4585,8 +5043,18 @@ async def process_successful_payment(payment_id: str):
     client_lines.append("🎫 Билет отправлен выше ⬆️\n")
     client_lines.append("Покажите QR-код на входе.")
 
+    kb_client = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="🎟 Мои билеты", callback_data="my_tickets"),
+        InlineKeyboardButton(text="🏠 На главную", callback_data="main_menu"),
+    ]])
+
     try:
-        await bot.send_message(user_id, "".join(client_lines), parse_mode="HTML")
+        await bot.send_message(
+            user_id,
+            "".join(client_lines),
+            reply_markup=kb_client,
+            parse_mode="HTML",
+        )
     except Exception:
         pass
 
@@ -4652,6 +5120,7 @@ async def show_main_menu(call: CallbackQuery, state: FSMContext):
 @dp.callback_query(F.data == "main_menu")
 async def main_menu_callback(call: CallbackQuery, state: FSMContext):
     await show_main_menu(call, state)
+
 
 
 

@@ -4466,8 +4466,19 @@ async def issue_ticket(user_id: int, code: str, ticket_type: str, holder_name: s
         "Покажите QR на входе."
     )
 
+       kb_ticket = InlineKeyboardMarkup(inline_keyboard=[[
+    InlineKeyboardButton(text="🎟 Мои билеты", callback_data="my_tickets"),
+    InlineKeyboardButton(text="🏠 На главную", callback_data="main_menu"),
+    ]])
+
     try:
-        await bot.send_photo(user_id, qr_file, caption=caption, parse_mode="HTML")
+        await bot.send_photo(
+            user_id,
+            qr_file,
+            caption=caption,
+            reply_markup=kb_ticket,
+            parse_mode="HTML",
+        )
     except Exception as e:
         print(f"[TICKET] Ошибка отправки билета user={user_id}: {e}")
 

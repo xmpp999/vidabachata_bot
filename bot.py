@@ -2000,7 +2000,7 @@ async def checker_stats(call: CallbackQuery):
         f"📊 <b>Статистика входа</b>\n\n"
         f"{header}\n\n"
         f"🎫 Всего билетов: <b>{total}</b>\n"
-        f"✅ Погашено: <b>{used}</b>\n"
+        f"🔴 Погашено: <b>{used}</b>\n"
         f"🟢 Осталось: <b>{total - used}</b>\n"
     )
 

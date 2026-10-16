@@ -4224,7 +4224,7 @@ async def show_main_menu(call: CallbackQuery, state: FSMContext):
         text = (
             f"👋 Привет!\n"
             f"Вы вошли как <b>главный администратор</b>.\n\n"
-            f"Выберите действие:\n\n"
+            f"Используйте панель ниже для управления ботом.\n\n"
             f"Подпишитесь на соцсети:\n"
             f"ВК (https://vk.com/vidabachata) • "
             f"Telegram (https://t.me/+eTMoEG6V1883Nzli)"

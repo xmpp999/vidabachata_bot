@@ -3975,6 +3975,7 @@ async def my_tickets_archive(call: CallbackQuery):
             f"⚪ <code>{code}</code>\n"
             f"   🎉 {t.get('event_title', '—')}\n"
             f"   📅 {t.get('event_date', '—')}\n"
+            f"   🛒 Куплен: {t.get('issued_at', '—')}\n"
             f"   🕐 Сгорел: {t.get('used_at', '—')}\n\n"
         )
 

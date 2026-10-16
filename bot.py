@@ -2970,10 +2970,10 @@ async def admin_find_ticket_query(message: Message, state: FSMContext):
         await state.clear()
         return
 
-    buttons = []
+        buttons = []
     for code, t in found[:30]:
         holder = t.get("holder", "—")
-        status = "✅" if t.get("used") else "🟢"
+        status = "🔴" if t.get("used") else "🟢"
         buttons.append([InlineKeyboardButton(
             text=f"{status} {code} — {holder[:20]}",
             callback_data=f"admin:ticket:show:{code}"

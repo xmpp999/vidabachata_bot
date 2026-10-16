@@ -4466,7 +4466,7 @@ async def issue_ticket(user_id: int, code: str, ticket_type: str, holder_name: s
         "Покажите QR на входе."
     )
 
-       kb_ticket = InlineKeyboardMarkup(inline_keyboard=[[
+    kb_ticket = InlineKeyboardMarkup(inline_keyboard=[[
     InlineKeyboardButton(text="🎟 Мои билеты", callback_data="my_tickets"),
     InlineKeyboardButton(text="🏠 На главную", callback_data="main_menu"),
     ]])

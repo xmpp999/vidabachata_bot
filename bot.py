@@ -3834,20 +3834,20 @@ async def show_main_menu(call: CallbackQuery, state: FSMContext):
     await state.clear()
     user_id = call.from_user.id
 
-        if user_id == ADMIN_ID:
-        text = (
+    if user_id == ADMIN_ID:                           ← строка 3837: 4 пробела
+        text = (                                      ← 8 пробелов
             f"👋 Привет!\n"
             f"Вы вошли как <b>главный администратор</b>.\n\n"
             f"Выберите действие:"
         )
-        kb = InlineKeyboardMarkup(inline_keyboard=[
+        kb = InlineKeyboardMarkup(inline_keyboard=[  ← 8 пробелов
             [InlineKeyboardButton(text="🛠 Админ-панель", callback_data="admin:back")],
             [InlineKeyboardButton(text="🎉 Мероприятия", callback_data="show_events")],
             [InlineKeyboardButton(text="🎫 Мои билеты", callback_data="my_tickets")],
             [InlineKeyboardButton(text="ВК", url="https://vk.com/vidabachata"),
              InlineKeyboardButton(text="Telegram", url="https://t.me/+eTMoEG6V1883Nzli")],
         ])
-    else:
+    else: 
         checker = find_checker_for_user(
             user_id=user_id,
             username=call.from_user.username or "",

@@ -4457,11 +4457,11 @@ async def issue_ticket(user_id: int, code: str, ticket_type: str, holder_name: s
         f"👤 {holder_name}\n"
     )
     if holder_username:
-        caption += f"💬 @{holder_username}\n"
-    caption += (
+        caption += (
         f"🎟 {type_label}\n"
         f"📅 {event.get('date_text', '')}\n"
-        f"📍 {event.get('place', '')}\n\n"
+        f"📍 {event.get('place', '')}\n"
+        f"🛒 Куплен: {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n"
         f"Код: <code>{code}</code>\n\n"
         "Покажите QR на входе."
     )

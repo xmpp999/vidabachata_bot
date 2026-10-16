@@ -2567,7 +2567,13 @@ async def finish_add_event(message: Message, state: FSMContext):
     events.append(event)
     save_data()
     await state.clear()
-    await message.answer(f"✅ Событие «{data['title']}» добавлено!")
+        await message.answer(
+        f"✅ Событие «{data['title']}» добавлено!",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🛠 Админ-панель", callback_data="admin:back")],
+            [InlineKeyboardButton(text="🏠 На главную", callback_data="main_menu")],
+        ]),
+    )
 
 
 @dp.callback_query(F.data == "admin:list")

@@ -4218,6 +4218,7 @@ async def show_my_ticket_qr(call: CallbackQuery):
         f"🎟 {type_label}\n"
         f"🎉 {ticket.get('event_title', '—')}\n"
         f"📅 {ticket.get('event_date', '—')}\n"
+        f"🛒 Куплен: {ticket.get('issued_at', '—')}\n"
     )
     if event and event.get("place"):
         caption += f"📍 {event.get('place')}\n"

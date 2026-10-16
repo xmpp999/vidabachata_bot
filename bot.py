@@ -3900,12 +3900,13 @@ async def my_tickets(call: CallbackQuery):
         type_label = "Парный" if t.get("type") == "pair" else "Обычный"
         event_title = t.get("event_title", "—")
         event_date = t.get("event_date", "—")
+        issued_at = t.get("issued_at", "—")
 
         text += (
             f"{status} <code>{code}</code>{status_label}\n"
             f"   🎉 {event_title}\n"
             f"   📅 {event_date}\n"
-            f"   🎟 {type_label}\n\n"
+            f"   🎟 {type_label}\n"
             f"   🛒 Куплен: {issued_at}\n\n"
         )
 

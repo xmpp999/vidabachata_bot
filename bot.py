@@ -3906,6 +3906,7 @@ async def my_tickets(call: CallbackQuery):
             f"   🎉 {event_title}\n"
             f"   📅 {event_date}\n"
             f"   🎟 {type_label}\n\n"
+            f"   🛒 Куплен: {issued_at}\n\n"
         )
 
         if not t.get("used") and not t.get("auto_used"):

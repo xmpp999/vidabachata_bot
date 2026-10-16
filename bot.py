@@ -4229,7 +4229,9 @@ async def show_main_menu(call: CallbackQuery, state: FSMContext):
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🛠 Админ-панель", callback_data="admin:back")],
             [InlineKeyboardButton(text="🎉 Мероприятия", callback_data="show_events")],
-            [InlineKeyboardButton(text="🎫 Мои билеты", callback_data="my_tickets")],
+            [InlineKeyboardButton(text="🎟 Мои билеты", callback_data="my_tickets")],
+            [InlineKeyboardButton(text="ВК", url="https://vk.com/vidabachata"),
+             InlineKeyboardButton(text="Telegram", url="https://t.me/+eTMoEG6V1883Nzli")],
         ])
     else:
         checker = find_checker_for_user(

@@ -4571,6 +4571,7 @@ async def process_successful_payment(payment_id: str):
         f"👤 {buyer_full_name}\n",
         f"🎉 {event.get('title', '')}\n",
         f"📅 {event.get('date_text', '')}\n",
+        f"🛒 Куплен: {datetime.now().strftime('%d.%m.%Y %H:%M')}\n",
     ]
     if event.get("place"):
         client_lines.append(f"📍 {event.get('place')}\n")

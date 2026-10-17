@@ -314,7 +314,7 @@ def load_data():
                 "phone": row.get("phone") or "",
                 "registered_at": row.get("registered_at") or "",
             }
-            uname = (row.get("username") or "").lower()
+            uname = (row.get("username") or "").lstrip("@").strip().lower()
             if uname:
                 username_index[uname] = uid
 
@@ -1366,7 +1366,7 @@ async def confirm_yes(call: CallbackQuery, state: FSMContext):
     data["username"] = call.from_user.username or ""
     users[call.from_user.id] = data
     if call.from_user.username:
-        username_index[call.from_user.username.lower()] = call.from_user.id
+        username_index[call.from_user.username.lstrip("@").strip().lower()] = call.from_user.id
 
     log_reg_attempt(
         user_id=call.from_user.id,
@@ -4865,7 +4865,7 @@ async def partner_input(message: Message, state: FSMContext):
         await message.answer("❌ Формат: <b>@username</b>", parse_mode="HTML")
         return
 
-    partner_id = username_index.get(text.lower())
+    partner_id = username_index.get(text.lower().lstrip("@").strip())
     if partner_id == message.from_user.id:
         await message.answer("❌ Нельзя себя.")
         return

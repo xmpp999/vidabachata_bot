@@ -3507,14 +3507,14 @@ async def admin_tickets(call: CallbackQuery):
         nav,
         [InlineKeyboardButton(text="🎯 По событиям", callback_data="admin:tickets_by_event")],
         [InlineKeyboardButton(text="🔄 Обновить", callback_data=f"admin:tickets:{page}")],
-        [InlineKeyboardButton(text="📥 Скачать CSV", callback_data="admin:tickets_csv")],
+        [InlineKeyboardButton(text="📥 Скачать CSV", callback_data="admin:csv_all_tickets")],
         [InlineKeyboardButton(text="📤 Выгрузка билетов", callback_data="admin:export")],
         [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin:back")],
     ])
     await call.message.edit_text(text[:4000], reply_markup=kb, parse_mode="HTML")
 
 
-@dp.callback_query(F.data == "admin:tickets_csv")
+@dp.callback_query(F.data == "admin:csv_all_tickets")
 async def admin_tickets_csv(call: CallbackQuery):
     if call.from_user.id != ADMIN_ID:
         await call.answer("Только для админа", show_alert=True)

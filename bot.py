@@ -3783,7 +3783,7 @@ async def admin_checker_export_xlsx(call: CallbackQuery):
         return
 
     parts = call.data.split(":")
-    event_id = parts[4] if len(parts) > 4 else ""
+    event_id = parts[3] if len(parts) > 3 else ""
     rows = _build_checkers_rows(event_id)
 
     if not rows:
@@ -3812,7 +3812,7 @@ async def admin_checker_export_pdf(call: CallbackQuery):
         return
 
     parts = call.data.split(":")
-    event_id = parts[4] if len(parts) > 4 else ""
+    event_id = parts[3] if len(parts) > 3 else ""
     rows = _build_checkers_rows(event_id)
 
     if not rows:

@@ -3513,10 +3513,34 @@ async def admin_tickets_csv(call: CallbackQuery):
         await call.answer("Только для админа", show_alert=True)
         return
 
-    rows = []
+        rows = []
     for code, t in tickets.items():
         owner = users.get(t.get("user_id"), {})
         status = "сгорел" if t.get("auto_used") else ("использован" if t.get("used") else "активен")
+
+        # Цена
+        price = 0
+        paid_by = ""
+        for o in orders:
+            if (str(o.get("user_id")) == str(t.get("user_id"))
+                    and str(o.get("event_id")) == str(t.get("event_id"))):
+                try:
+                    price = int(o.get("price", 0) or 0)
+                except (TypeError, ValueError):
+                    price = 0
+                break
+
+        if price == 0 and t.get("type") == "pair":
+            partner_code = t.get("partner_code") or ""
+            if partner_code:
+                partner_ticket = tickets.get(partner_code)
+                if partner_ticket:
+                    partner_uid = partner_ticket.get("user_id")
+                    partner_user = users.get(int(partner_uid or 0), {})
+                    partner_uname = partner_user.get("username") or ""
+                    if partner_uname:
+                        paid_by = f"@{partner_uname}"
+
         rows.append([
             code,
             t.get("user_id", ""),
@@ -3530,6 +3554,8 @@ async def admin_tickets_csv(call: CallbackQuery):
             t.get("issued_at", ""),
             t.get("used_at", ""),
             t.get("used_by", ""),
+            price,
+            paid_by,
         ])
 
     csv_bytes = make_csv(
@@ -3595,6 +3621,7 @@ async def admin_archived_tickets(call: CallbackQuery):
 
 
 @dp.callback_query(F.data == "admin:archived_tickets_csv")
+@dp.callback_query(F.data == "admin:archived_tickets_csv")
 async def admin_archived_tickets_csv(call: CallbackQuery):
     if call.from_user.id != ADMIN_ID:
         await call.answer("Только для админа", show_alert=True)
@@ -3607,6 +3634,30 @@ async def admin_archived_tickets_csv(call: CallbackQuery):
         if not is_ticket_archived(t):
             continue
         owner = users.get(t.get("user_id"), {})
+
+        # Цена
+        price = 0
+        paid_by = ""
+        for o in orders:
+            if (str(o.get("user_id")) == str(t.get("user_id"))
+                    and str(o.get("event_id")) == str(t.get("event_id"))):
+                try:
+                    price = int(o.get("price", 0) or 0)
+                except (TypeError, ValueError):
+                    price = 0
+                break
+
+        if price == 0 and t.get("type") == "pair":
+            partner_code = t.get("partner_code") or ""
+            if partner_code:
+                partner_ticket = tickets.get(partner_code)
+                if partner_ticket:
+                    partner_uid = partner_ticket.get("user_id")
+                    partner_user = users.get(int(partner_uid or 0), {})
+                    partner_uname = partner_user.get("username") or ""
+                    if partner_uname:
+                        paid_by = f"@{partner_uname}"
+
         rows.append([
             code,
             t.get("user_id", ""),
@@ -3620,12 +3671,14 @@ async def admin_archived_tickets_csv(call: CallbackQuery):
             t.get("issued_at", ""),
             t.get("used_at", ""),
             t.get("used_by", ""),
+            price,
+            paid_by,
         ])
 
     csv_bytes = make_csv(
         ["ticket_code", "holder_id", "holder_name", "phone", "username",
          "type", "status", "event_title", "event_date", "issued_at",
-         "used_at", "used_by"],
+         "used_at", "used_by", "price", "paid_by"],
         rows
     )
     await call.message.answer_document(
@@ -3649,6 +3702,30 @@ def _export_tickets_data(tickets_filtered: list) -> list:
         else:
             status = "активен"
 
+        # Цена: ищем заказ по user_id + event_id
+        price = 0
+        paid_by = ""
+        for o in orders:
+            if (str(o.get("user_id")) == str(t.get("user_id"))
+                    and str(o.get("event_id")) == str(t.get("event_id"))):
+                try:
+                    price = int(o.get("price", 0) or 0)
+                except (TypeError, ValueError):
+                    price = 0
+                break
+
+        # Парный билет без своего заказа: показываем 0 + кто оплатил
+        if price == 0 and t.get("type") == "pair":
+            partner_code = t.get("partner_code") or ""
+            if partner_code:
+                partner_ticket = tickets.get(partner_code)
+                if partner_ticket:
+                    partner_uid = partner_ticket.get("user_id")
+                    partner_user = users.get(int(partner_uid or 0), {})
+                    partner_uname = partner_user.get("username") or ""
+                    if partner_uname:
+                        paid_by = f"@{partner_uname}"
+
         rows.append([
             code,
             t.get("user_id", ""),
@@ -3662,6 +3739,8 @@ def _export_tickets_data(tickets_filtered: list) -> list:
             t.get("issued_at", ""),
             t.get("used_at", ""),
             t.get("used_by", ""),
+            price,
+            paid_by,
         ])
     return rows
 
@@ -3670,7 +3749,7 @@ def _tickets_headers():
     return [
         "ticket_code", "holder_id", "holder_name", "phone", "username",
         "type", "status", "event_title", "event_date", "issued_at",
-        "used_at", "used_by",
+        "used_at", "used_by", "price", "paid_by",
     ]
 
 

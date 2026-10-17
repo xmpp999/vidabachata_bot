@@ -3705,8 +3705,8 @@ async def admin_checker_export_menu(call: CallbackQuery):
 
     parts = call.data.split(":")
     # admin:checker_export_menu:all:  или  admin:checker_export_menu:ev:<event_id>
-    scope = parts[3] if len(parts) > 3 else "all"
-    event_id = parts[4] if len(parts) > 4 else ""
+    scope = parts[2] if len(parts) > 2 else "all"
+    event_id = parts[3] if len(parts) > 3 else ""
 
     # Считаем активные билеты (для этого события или для всех)
     count = 0

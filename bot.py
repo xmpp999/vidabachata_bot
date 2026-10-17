@@ -4799,7 +4799,7 @@ async def event_selected(call: CallbackQuery, state: FSMContext):
         )]]
         if event.get("price_pair", 0) > 0:
             buttons.append([InlineKeyboardButton(
-                text=f"🎟 Парный — {event['price_pair'] * 2} ₽",
+                text=f"🎟 Парный — {event['price_pair']} ₽",
                 callback_data="ticket:pair"
             )])
         buttons.append([InlineKeyboardButton(

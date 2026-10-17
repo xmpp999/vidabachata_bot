@@ -5074,7 +5074,7 @@ async def process_successful_payment(payment_id: str):
     buyer_code = generate_ticket_code()
     await issue_ticket(user_id, buyer_code, ticket_type, buyer_name, event)
 
-        if ticket_type == "pair" and pending.get("partner_id"):
+    if ticket_type == "pair" and pending.get("partner_id"):
         partner_id = pending["partner_id"]
         if partner_id in users:
             partner = users[partner_id]

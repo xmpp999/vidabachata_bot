@@ -214,6 +214,9 @@ def delete_checker(chk_id: str):
 
 
 
+# ========== КОНЕЦ ЧАСТИ 1 ==========
+
+
 def save_data():
     """
     Аварийное полное сохранение (только при старте/миграции).
@@ -303,13 +306,13 @@ def load_data():
         for row in resp.data:
             uid = int(row["user_id"])
             users[uid] = {
-                "username": row.get("username", ""),
-                "email": row.get("email", ""),
-                "name": row.get("name", ""),
-                "surname": row.get("surname", ""),
-                "gender": row.get("gender", ""),
-                "phone": row.get("phone", ""),
-                "registered_at": row.get("registered_at", ""),
+                "username": row.get("username") or "",
+                "email": row.get("email") or "",
+                "name": row.get("name") or "",
+                "surname": row.get("surname") or "",
+                "gender": row.get("gender") or "",
+                "phone": row.get("phone") or "",
+                "registered_at": row.get("registered_at") or "",
             }
             uname = (row.get("username") or "").lower()
             if uname:
@@ -319,16 +322,16 @@ def load_data():
         events = []
         for row in resp.data:
             events.append({
-                "id": row.get("id", ""),
-                "title": row.get("title", ""),
-                "date_text": row.get("date_text", ""),
-                "start_dt": row.get("start_dt", ""),
-                "place": row.get("place", ""),
-                "description": row.get("description", ""),
+                "id": row.get("id") or "",
+                "title": row.get("title") or "",
+                "date_text": row.get("date_text") or "",
+                "start_dt": row.get("start_dt") or "",
+                "place": row.get("place") or "",
+                "description": row.get("description") or "",
                 "price_single": row.get("price_single", 0),
                 "price_pair": row.get("price_pair", 0),
                 "photo_id": row.get("photo_id"),
-                "created_at": row.get("created_at", ""),
+                "created_at": row.get("created_at") or "",
                 "active": row.get("active", True),
                 "archived": row.get("archived", False),
                 "archived_at": row.get("archived_at"),
@@ -339,17 +342,17 @@ def load_data():
         for row in resp.data:
             tickets[row["code"]] = {
                 "user_id": row.get("user_id"),
-                "type": row.get("type", ""),
-                "holder": row.get("holder", ""),
+                "type": row.get("type") or "",
+                "holder": row.get("holder") or "",
                 "used": row.get("used", False),
-                "used_at": row.get("used_at", ""),
-                "used_by": row.get("used_by", ""),
+                "used_at": row.get("used_at") or "",
+                "used_by": row.get("used_by") or "",
                 "auto_used": row.get("auto_used", False),
                 "archived_at": row.get("archived_at"),
-                "event_id": row.get("event_id", ""),
-                "event_title": row.get("event_title", ""),
-                "event_date": row.get("event_date", ""),
-                "issued_at": row.get("issued_at", ""),
+                "event_id": row.get("event_id") or "",
+                "event_title": row.get("event_title") or "",
+                "event_date": row.get("event_date") or "",
+                "issued_at": row.get("issued_at") or "",
             }
 
         resp = supabase.table("orders").select("*").execute()
@@ -362,10 +365,10 @@ def load_data():
             v = v.replace(" ", "").replace("-", "").replace("+", "")
             key = f"{row.get('type')}:{v}"
             blacklist[key] = {
-                "type": row.get("type", ""),
-                "value": row.get("value", ""),
-                "reason": row.get("reason", ""),
-                "added_at": row.get("added_at", ""),
+                "type": row.get("type") or "",
+                "value": row.get("value") or "",
+                "reason": row.get("reason") or "",
+                "added_at": row.get("added_at") or "",
             }
 
         resp = supabase.table("reg_attempts").select("*").order("id", desc=False).limit(500).execute()
@@ -384,7 +387,7 @@ def load_data():
                 "name": row.get("name") or "",
                 "event_id": row.get("event_id"),
                 "added_by": row.get("added_by"),
-                "added_at": row.get("added_at", ""),
+                "added_at": row.get("added_at") or "",
                 "active": row.get("active", True),
             }
 
@@ -433,6 +436,9 @@ def create_yookassa_payment(amount: int, description: str, user_id: int, metadat
     except Exception as e:
         print(f"[YOOKASSA] Ошибка создания платежа: {e}")
         return {}
+
+
+# ========== КОНЕЦ ЧАСТИ 2 ==========
 
 
 def verify_payment_with_yookassa(payment_id: str) -> bool:
@@ -681,6 +687,9 @@ def is_ticket_archived(ticket: dict) -> bool:
         return datetime.now() >= used_at + timedelta(days=days)
     except Exception:
         return False
+
+
+# ========== КОНЕЦ ЧАСТИ 3 ==========
 
 
 def generate_ticket_code() -> str:
@@ -995,6 +1004,8 @@ def start_auto_burn():
     asyncio.create_task(_auto_burn_loop())
 
 
+# ========== КОНЕЦ ЧАСТИ 4 ==========
+
 # ================== СОСТОЯНИЯ ==================
 class Reg(StatesGroup):
     phone = State()
@@ -1261,6 +1272,8 @@ async def get_phone(message: Message, state: FSMContext):
 async def wrong_phone(message: Message):
     await message.answer("Пожалуйста, нажмите кнопку «Поделиться контактом» 👇")
 
+
+# ========== КОНЕЦ ЧАСТИ 5 ==========
 
 @dp.message(Reg.name)
 async def get_name(message: Message, state: FSMContext):
@@ -1549,6 +1562,9 @@ async def checker_process_code(message: Message, state: FSMContext):
     await show_checker_ticket_card(message, code, ticket)
 
 
+# ========== КОНЕЦ ЧАСТИ 6 ==========
+
+
 # ================== ПОИСК ПО ИМЕНИ / ТЕЛЕФОНУ ==================
 @dp.callback_query(F.data == "checker:find_name")
 async def checker_find_name(call: CallbackQuery, state: FSMContext):
@@ -1742,6 +1758,7 @@ async def show_checker_ticket_card(message: Message, code: str, ticket: dict):
 @dp.callback_query(F.data == "checker:noop")
 async def checker_noop(call: CallbackQuery):
     await call.answer("Этот билет уже недействителен", show_alert=True)
+
 
 
 
@@ -2088,6 +2105,7 @@ async def checker_stats(call: CallbackQuery):
     await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
 
 
+# ========== КОНЕЦ ЧАСТИ 7 ==========
 
 
 # ================== АДМИН ==================
@@ -2485,6 +2503,9 @@ async def finish_add_checker(call: CallbackQuery, state: FSMContext, event_id: O
     )
 
 
+# ========== КОНЕЦ ЧАСТИ 8 ==========
+
+
 @dp.callback_query(F.data == "admin:chk:list")
 async def admin_chk_list(call: CallbackQuery):
     if call.from_user.id != ADMIN_ID:
@@ -2559,7 +2580,7 @@ async def admin_chk_remove_start(call: CallbackQuery):
 
 
 @dp.callback_query(F.data.startswith("admin:chk:del:"))
-async def admin_chk_remove_confirm(call: CallbackQuery):
+async def admin_chk_remove_confirm(call: CallbackQuery, state: FSMContext):
     if call.from_user.id != ADMIN_ID:
         await call.answer("Только для главного админа", show_alert=True)
         return
@@ -2576,7 +2597,7 @@ async def admin_chk_remove_confirm(call: CallbackQuery):
     checkers.pop(chk_id, None)
 
     await call.answer(f"Удалён: {name}")
-    await admin_checkers_menu(call, None)
+    await admin_checkers_menu(call, state)
 
 
 
@@ -2851,7 +2872,7 @@ async def admin_delete_arch_confirm(call: CallbackQuery, state: FSMContext):
     await show_admin_menu(call.message, state)
 
 
-
+# ========== КОНЕЦ ЧАСТИ 9 ==========
 
 # ================== БИЛЕТЫ ПО СОБЫТИЮ (ГЛАВНЫЙ ЭКРАН) ==================
 
@@ -2919,7 +2940,7 @@ def _build_event_tickets_text(event: dict, filtered: list, filter_mode: str, pag
                 status = "🟢 активен"
 
             # Имя
-            holder = t.get("holder", "—")
+            holder = t.get("holder") or "—"
 
             # Телефон и username
             owner = users.get(t.get("user_id"), {})
@@ -2927,7 +2948,7 @@ def _build_event_tickets_text(event: dict, filtered: list, filter_mode: str, pag
             username = owner.get("username") or ""
 
             # Дата покупки
-            issued_at = t.get("issued_at", "—")
+            issued_at = t.get("issued_at") or "—"
 
             # Кто погасил
             used_by = t.get("used_by") or ""
@@ -3065,14 +3086,18 @@ async def admin_event_tickets(call: CallbackQuery):
     else:
         filtered = all_event_tickets
 
-    # Сортировка: сначала активные, потом погашенные, потом сгоревшие
+    # ✅ Сортировка: сначала активные, потом погашенные, потом сгоревшие.
+    # Защита от None — используем `or ""`, иначе Python падает на
+    # сравнении None < str (это был баг с TypeError в старом коде).
     def sort_key(kv):
         _, t = kv
+        used_at = t.get("used_at") or ""
+        issued_at = t.get("issued_at") or ""
         if t.get("auto_used"):
-            return (2, t.get("used_at", ""))
+            return (2, used_at)
         if t.get("used"):
-            return (1, t.get("used_at", ""))
-        return (0, t.get("issued_at", ""))
+            return (1, used_at)
+        return (0, issued_at)
 
     filtered.sort(key=sort_key, reverse=False)
 
@@ -3134,7 +3159,7 @@ async def admin_tickets_by_event(call: CallbackQuery):
     await call.answer()
 
 
-
+# ========== КОНЕЦ ЧАСТИ 10 ==========
 
 # ================== СТАТИСТИКА (АДМИН) ==================
 @dp.callback_query(F.data == "admin:stats")
@@ -3410,7 +3435,8 @@ async def admin_tickets(call: CallbackQuery):
     page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
 
     all_items = [(c, t) for c, t in tickets.items() if not t.get("auto_used")]
-    all_items.sort(key=lambda kv: kv[1].get("issued_at", ""), reverse=True)
+    # ✅ Защита от None в issued_at
+    all_items.sort(key=lambda kv: kv[1].get("issued_at") or "", reverse=True)
 
     total = len(all_items)
     total_pages = max(1, (total + TICKETS_PAGE_SIZE - 1) // TICKETS_PAGE_SIZE)
@@ -3502,6 +3528,8 @@ async def admin_tickets_csv(call: CallbackQuery):
     await call.answer()
 
 
+# ========== КОНЕЦ ЧАСТИ 11 ==========
+
 # ================== АРХИВ БИЛЕТОВ (АДМИН) ==================
 @dp.callback_query(F.data == "admin:archived_tickets")
 async def admin_archived_tickets(call: CallbackQuery):
@@ -3516,7 +3544,8 @@ async def admin_archived_tickets(call: CallbackQuery):
         if is_ticket_archived(t):
             archived.append((code, t))
 
-    archived.sort(key=lambda kv: kv[1].get("used_at", ""), reverse=True)
+    # ✅ Защита от None
+    archived.sort(key=lambda kv: kv[1].get("used_at") or "", reverse=True)
 
     if not archived:
         await call.message.edit_text(
@@ -3817,13 +3846,16 @@ async def admin_export_event_xlsx(call: CallbackQuery):
         await call.answer("Нет билетов по фильтру", show_alert=True)
         return
 
+    # ✅ Защита от None при сортировке
     def sort_key(kv):
         _, t = kv
+        used_at = t.get("used_at") or ""
+        issued_at = t.get("issued_at") or ""
         if t.get("auto_used"):
-            return (2, t.get("used_at", ""))
+            return (2, used_at)
         if t.get("used"):
-            return (1, t.get("used_at", ""))
-        return (0, t.get("issued_at", ""))
+            return (1, used_at)
+        return (0, issued_at)
 
     filtered.sort(key=sort_key)
 
@@ -3874,13 +3906,16 @@ async def admin_export_event_pdf(call: CallbackQuery):
         await call.answer("Нет билетов по фильтру", show_alert=True)
         return
 
+    # ✅ Защита от None при сортировке
     def sort_key(kv):
         _, t = kv
+        used_at = t.get("used_at") or ""
+        issued_at = t.get("issued_at") or ""
         if t.get("auto_used"):
-            return (2, t.get("used_at", ""))
+            return (2, used_at)
         if t.get("used"):
-            return (1, t.get("used_at", ""))
-        return (0, t.get("issued_at", ""))
+            return (1, used_at)
+        return (0, issued_at)
 
     filtered.sort(key=sort_key)
 
@@ -3909,384 +3944,7 @@ async def admin_export_event_pdf(call: CallbackQuery):
     await call.answer()
 
 
-# ================== МЕНЮ ЭКСПОРТА (общее) ==================
-@dp.callback_query(F.data == "admin:export")
-async def admin_export_menu(call: CallbackQuery):
-    if call.from_user.id != ADMIN_ID:
-        await call.answer("Только для админа", show_alert=True)
-        return
-
-    total = len(tickets)
-    active = sum(1 for t in tickets.values() if not t.get("used") and not t.get("auto_used"))
-    used = sum(1 for t in tickets.values() if t.get("used") and not t.get("auto_used"))
-    burned = sum(1 for t in tickets.values() if t.get("auto_used"))
-
-    text = (
-        f"📤 <b>Выгрузка билетов</b>\n\n"
-        f"Всего: <b>{total}</b>\n"
-        f"🟢 Активных: <b>{active}</b>\n"
-        f"🔴 Погашено: <b>{used}</b>\n"
-        f"⚪ Сгорело: <b>{burned}</b>\n\n"
-        f"Выберите формат:"
-    )
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📊 Excel (XLSX)", callback_data="admin:export:xlsx:all")],
-        [InlineKeyboardButton(text="📄 PDF", callback_data="admin:export:pdf:all")],
-        [InlineKeyboardButton(text="📦 ZIP с QR-кодами", callback_data="admin:export:zip:all")],
-        [InlineKeyboardButton(text="📋 CSV", callback_data="admin:export:csv:all")],
-        [InlineKeyboardButton(text="🎯 Фильтры", callback_data="admin:export:filter")],
-        [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin:back")],
-    ])
-
-    await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
-
-
-@dp.callback_query(F.data == "admin:export:filter")
-async def admin_export_filter(call: CallbackQuery):
-    if call.from_user.id != ADMIN_ID:
-        await call.answer("Только для админа", show_alert=True)
-        return
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔴 Только погашенные", callback_data="admin:export:xlsx:used")],
-        [InlineKeyboardButton(text="🟢 Только активные", callback_data="admin:export:xlsx:active")],
-        [InlineKeyboardButton(text="⚪ Только сгоревшие", callback_data="admin:export:xlsx:burned")],
-        [InlineKeyboardButton(text="🎟 Только парные", callback_data="admin:export:xlsx:pair")],
-        [InlineKeyboardButton(text="🎫 Только обычные", callback_data="admin:export:xlsx:single")],
-        [InlineKeyboardButton(text="🎉 За конкретное событие", callback_data="admin:export:byevent")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin:export")],
-    ])
-
-    await call.message.edit_text(
-        "🎯 <b>Фильтры билетов</b>\n\n"
-        "Выберите, какие билеты включить в выгрузку:",
-        reply_markup=kb, parse_mode="HTML",
-    )
-
-
-@dp.callback_query(F.data == "admin:export:byevent")
-async def admin_export_byevent(call: CallbackQuery):
-    if call.from_user.id != ADMIN_ID:
-        await call.answer("Только для админа", show_alert=True)
-        return
-
-    if not events:
-        await call.answer("Нет событий", show_alert=True)
-        return
-
-    buttons = []
-    for e in events:
-        cnt = sum(1 for t in tickets.values() if str(t.get("event_id")) == str(e["id"]))
-        buttons.append([InlineKeyboardButton(
-            text=f"🎉 {e['title'][:30]} ({cnt})",
-            callback_data=f"admin:export:event:{e['id']}"
-        )])
-    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="admin:export:filter")])
-
-    await call.message.edit_text(
-        "🎉 <b>Выберите событие</b>:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
-        parse_mode="HTML",
-    )
-
-
-@dp.callback_query(F.data.startswith("admin:export:event:"))
-async def admin_export_event(call: CallbackQuery):
-    if call.from_user.id != ADMIN_ID:
-        await call.answer("Только для админа", show_alert=True)
-        return
-
-    event_id = call.data.split(":", 3)[3]
-    filtered = [(c, t) for c, t in tickets.items() if str(t.get("event_id")) == str(event_id)]
-
-    if not filtered:
-        await call.answer("Нет билетов на это событие", show_alert=True)
-        return
-
-    ev = next((e for e in events if str(e["id"]) == str(event_id)), None)
-    title = ev["title"] if ev else "event"
-
-    rows = _export_tickets_data(filtered)
-    xlsx_bytes = make_xlsx(_tickets_headers(), rows)
-
-    await call.message.answer_document(
-        BufferedInputFile(xlsx_bytes, filename=f"tickets_{event_id}.xlsx"),
-        caption=f"📊 Билеты на «{title}» ({len(filtered)} шт)",
-    )
-    await call.answer()
-
-
-@dp.callback_query(F.data.startswith("admin:export:xlsx:"))
-async def admin_export_xlsx(call: CallbackQuery):
-    if call.from_user.id != ADMIN_ID:
-        await call.answer("Только для админа", show_alert=True)
-        return
-
-    mode = call.data.split(":", 3)[3]
-    filtered = _apply_filter(mode)
-
-    if not filtered:
-        await call.answer("Нет билетов по фильтру", show_alert=True)
-        return
-
-    rows = _export_tickets_data(filtered)
-    xlsx_bytes = make_xlsx(_tickets_headers(), rows)
-
-    await call.message.answer_document(
-        BufferedInputFile(xlsx_bytes, filename=f"tickets_{mode}.xlsx"),
-        caption=f"📊 Excel: {len(filtered)} билетов ({mode})",
-    )
-    await call.answer()
-
-
-@dp.callback_query(F.data.startswith("admin:export:pdf:"))
-async def admin_export_pdf(call: CallbackQuery):
-    if call.from_user.id != ADMIN_ID:
-        await call.answer("Только для админа", show_alert=True)
-        return
-
-    mode = call.data.split(":", 3)[3]
-    filtered = _apply_filter(mode)
-
-    if not filtered:
-        await call.answer("Нет билетов по фильтру", show_alert=True)
-        return
-
-    rows = _export_tickets_data(filtered)
-    pdf_bytes = make_pdf(_tickets_headers(), rows, title=f"Билеты ({mode}, {len(filtered)} шт)")
-
-    await call.message.answer_document(
-        BufferedInputFile(pdf_bytes, filename=f"tickets_{mode}.pdf"),
-        caption=f"📄 PDF: {len(filtered)} билетов ({mode})",
-    )
-    await call.answer()
-
-
-@dp.callback_query(F.data.startswith("admin:export:zip:"))
-async def admin_export_zip(call: CallbackQuery):
-    if call.from_user.id != ADMIN_ID:
-        await call.answer("Только для админа", show_alert=True)
-        return
-
-    mode = call.data.split(":", 3)[3]
-    filtered = _apply_filter(mode)
-
-    if not filtered:
-        await call.answer("Нет билетов по фильтру", show_alert=True)
-        return
-
-    if len(filtered) > 200:
-        await call.answer(f"Слишком много билетов ({len(filtered)}). Максимум 200.", show_alert=True)
-        return
-
-    await call.answer("📦 Генерирую ZIP...")
-    zip_bytes = make_zip_qr(filtered)
-
-    await call.message.answer_document(
-        BufferedInputFile(zip_bytes, filename=f"qr_codes_{mode}.zip"),
-        caption=f"📦 ZIP с QR: {len(filtered)} билетов ({mode})",
-    )
-
-
-@dp.callback_query(F.data.startswith("admin:export:csv:"))
-async def admin_export_csv_filtered(call: CallbackQuery):
-    if call.from_user.id != ADMIN_ID:
-        await call.answer("Только для админа", show_alert=True)
-        return
-
-    mode = call.data.split(":", 3)[3]
-    filtered = _apply_filter(mode)
-
-    if not filtered:
-        await call.answer("Нет билетов по фильтру", show_alert=True)
-        return
-
-    rows = _export_tickets_data(filtered)
-    csv_bytes = make_csv(_tickets_headers(), rows)
-
-    await call.message.answer_document(
-        BufferedInputFile(csv_bytes, filename=f"tickets_{mode}.csv"),
-        caption=f"📋 CSV: {len(filtered)} билетов ({mode})",
-    )
-    await call.answer()
-
-
-
-
-# ================== ЧЁРНЫЙ СПИСОК (АДМИН) ==================
-@dp.callback_query(F.data == "admin:blacklist")
-async def admin_blacklist_menu(call: CallbackQuery):
-    if call.from_user.id != ADMIN_ID:
-        await call.answer("Только для админа", show_alert=True)
-        return
-
-    text = get_blacklist_text()[:4000]
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Добавить username", callback_data="admin:bl:add_username")],
-        [InlineKeyboardButton(text="📱 Добавить телефон", callback_data="admin:bl:add_phone")],
-        [InlineKeyboardButton(text="🗑 Удалить", callback_data="admin:bl:remove")],
-        [InlineKeyboardButton(text="🔄 Обновить", callback_data="admin:blacklist")],
-        [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin:back")],
-    ])
-    await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
-
-
-@dp.callback_query(F.data == "admin:bl:add_username")
-async def admin_bl_add_username(call: CallbackQuery, state: FSMContext):
-    await state.update_data(bl_type="username")
-    await call.message.edit_text(
-        "🚫 <b>Добавление в ЧС</b>\n\n"
-        "Шаг 1/2. Отправьте <b>@username</b>:\n\n"
-        "Для отмены — /admin",
-        parse_mode="HTML",
-    )
-    await state.set_state(Admin.blacklist_add_username)
-
-
-@dp.message(Admin.blacklist_add_username)
-async def admin_bl_save_username(message: Message, state: FSMContext):
-    if message.text == "/admin":
-        await state.clear()
-        await show_admin_menu(message, state)
-        return
-
-    value = message.text.strip()
-    if not value.startswith("@"):
-        value = "@" + value
-
-    await state.update_data(bl_value=value)
-    await state.set_state(Admin.blacklist_reason)
-    await message.answer("Шаг 2/2. Причина (или <code>-</code>):", parse_mode="HTML")
-
-
-@dp.callback_query(F.data == "admin:bl:add_phone")
-async def admin_bl_add_phone(call: CallbackQuery, state: FSMContext):
-    await state.update_data(bl_type="phone")
-    await call.message.edit_text(
-        "🚫 <b>Добавление в ЧС</b>\n\n"
-        "Шаг 1/2. Отправьте <b>номер телефона</b>:\n\n"
-        "Для отмены — /admin",
-        parse_mode="HTML",
-    )
-    await state.set_state(Admin.blacklist_add_phone)
-
-
-@dp.message(Admin.blacklist_add_phone)
-async def admin_bl_save_phone(message: Message, state: FSMContext):
-    if message.text == "/admin":
-        await state.clear()
-        await show_admin_menu(message, state)
-        return
-
-    value = message.text.strip()
-    await state.update_data(bl_value=value)
-    await state.set_state(Admin.blacklist_reason)
-    await message.answer("Шаг 2/2. Причина (или <code>-</code>):", parse_mode="HTML")
-
-
-@dp.message(Admin.blacklist_reason)
-async def admin_bl_save_reason(message: Message, state: FSMContext):
-    reason = message.text.strip()
-    if reason == "-":
-        reason = ""
-
-    data = await state.get_data()
-    bl_type = data.get("bl_type", "username")
-    bl_value = data.get("bl_value", "")
-
-    ok = add_to_blacklist(bl_type, bl_value, reason)
-    await state.clear()
-
-    if ok:
-        await message.answer(f"✅ Добавлено в ЧС: <code>{bl_value}</code>", parse_mode="HTML")
-    else:
-        await message.answer("⚠️ Уже в ЧС.")
-
-    await show_admin_menu(message, state)
-
-
-@dp.callback_query(F.data == "admin:bl:remove")
-async def admin_bl_remove_start(call: CallbackQuery):
-    if not blacklist:
-        await call.answer("ЧС пуст", show_alert=True)
-        return
-
-    buttons = []
-    for key, item in list(blacklist.items())[:30]:
-        icon = "📱" if item.get("type") == "phone" else "👤"
-        buttons.append([InlineKeyboardButton(
-            text=f"🗑 {icon} {item.get('value')}",
-            callback_data=f"admin:bl:del:{item.get('value')}"
-        )])
-    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="admin:blacklist")])
-
-    await call.message.edit_text(
-        "🗑 Выберите запись для удаления:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
-    )
-
-
-@dp.callback_query(F.data.startswith("admin:bl:del:"))
-async def admin_bl_remove_confirm(call: CallbackQuery):
-    value = call.data.split(":", 3)[3]
-    ok = remove_from_blacklist(value)
-    if ok:
-        await call.answer("Удалено")
-    else:
-        await call.answer("Не найдено", show_alert=True)
-    await admin_blacklist_menu(call)
-
-
-# ================== ПОПЫТКИ РЕГИСТРАЦИИ (АДМИН) ==================
-@dp.callback_query(F.data == "admin:reg_attempts")
-async def admin_reg_attempts(call: CallbackQuery):
-    if call.from_user.id != ADMIN_ID:
-        await call.answer("Только для админа", show_alert=True)
-        return
-
-    text = get_reg_attempts_text(limit=30)[:4000]
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔄 Обновить", callback_data="admin:reg_attempts")],
-        [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin:back")],
-    ])
-    await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
-
-
-# ================== МЕРОПРИЯТИЯ (КЛИЕНТ) ==================
-@dp.callback_query(F.data == "show_events")
-async def show_events(call: CallbackQuery):
-    now = datetime.now()
-    upcoming = [
-        e for e in events
-        if e.get("active", True) and datetime.fromisoformat(e["start_dt"]) > now
-    ]
-
-    if not upcoming:
-        await call.message.answer("📭 Пока нет доступных событий.")
-        return
-
-    buttons = []
-    for e in upcoming:
-        buttons.append([InlineKeyboardButton(
-            text=f"🎉 {e['title']} — {e['date_text']}",
-            callback_data=f"event:{e['id']}"
-        )])
-
-    buttons.append([InlineKeyboardButton(
-        text="🔄 Обновить", callback_data="show_events"
-    )])
-    buttons.append([InlineKeyboardButton(
-        text="🏠 На главную", callback_data="main_menu"
-    )])
-
-    await call.message.answer(
-        "🎉 <b>Выберите мероприятие:</b>",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
-        parse_mode="HTML",
-    )
+# ========== КОНЕЦ ЧАСТИ 12 ==========
 
 
 # ================== МОИ БИЛЕТЫ (КЛИЕНТ) ==================
@@ -4318,13 +3976,16 @@ async def my_tickets(call: CallbackQuery):
         if not is_ticket_archived(t)
     ]
 
+    # ✅ Защита от None — используем `or ""`
     def sort_key(kv):
         _, t = kv
+        used_at = t.get("used_at") or ""
+        event_date = t.get("event_date") or ""
         if t.get("auto_used"):
-            return (2, t.get("used_at", ""))
+            return (2, used_at)
         if t.get("used"):
-            return (1, t.get("used_at", ""))
-        return (0, t.get("event_date", ""))
+            return (1, used_at)
+        return (0, event_date)
 
     user_tickets.sort(key=sort_key)
 
@@ -4420,7 +4081,8 @@ async def my_tickets_archive(call: CallbackQuery):
         )
         return
 
-    archived.sort(key=lambda kv: kv[1].get("used_at", ""), reverse=True)
+    # ✅ Защита от None
+    archived.sort(key=lambda kv: kv[1].get("used_at") or "", reverse=True)
 
     text = f"📦 <b>Архив билетов</b> ({len(archived)})\n\n"
     for code, t in archived[:30]:
@@ -4761,6 +4423,8 @@ async def event_selected(call: CallbackQuery, state: FSMContext):
     await state.set_state(Reg.ticket_type)
 
 
+# ========== КОНЕЦ ЧАСТИ 14 ==========
+
 # ================== ОПЛАТА ЧЕРЕЗ ЮKASSA ==================
 @dp.callback_query(F.data == "ticket:single", Reg.ticket_type)
 async def ticket_single(call: CallbackQuery, state: FSMContext):
@@ -5060,6 +4724,9 @@ async def process_successful_payment(payment_id: str):
         to_remove = list(processed_payments)[:1000]
         for pid in to_remove:
             processed_payments.discard(pid)
+
+
+# ========== КОНЕЦ ЧАСТИ 15 ==========
 
 
 # ================== ГЛАВНОЕ МЕНЮ ==================

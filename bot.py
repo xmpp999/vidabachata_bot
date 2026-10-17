@@ -1893,7 +1893,7 @@ async def checker_use_ticket(call: CallbackQuery):
         if owner_id:
             await bot.send_message(
                 owner_id,
-                f"✅ <b>Билет погашен!</b>\n\n"
+                f"🔴 <b>Билет погашен!</b>\n\n"
                 f"🎫 Код: <code>{code}</code>\n"
                 f"🎉 {ticket.get('event_title', '—')}\n"
                 f"📅 {ticket.get('event_date', '—')}\n"
@@ -1904,17 +1904,40 @@ async def checker_use_ticket(call: CallbackQuery):
     except Exception as e:
         print(f"[NOTIFY] Ошибка уведомления гостя: {e}")
 
+        # Собираем данные гостя
+    holder_user = {}
+    try:
+        if ticket.get("user_id"):
+            holder_user = users.get(int(ticket.get("user_id")), {})
+    except (TypeError, ValueError):
+        pass
+    holder_username = holder_user.get("username") or ""
+    holder_phone = holder_user.get("phone") or "—"
+
     checker_name = checker.get("name") or call.from_user.full_name
     kb_ok = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⬅️ В меню", callback_data="checker:menu")],
         [InlineKeyboardButton(text="🏠 На главную", callback_data="main_menu")],
     ])
-    await call.message.edit_text(
-        f"✅ <b>Билет погашен</b>\n\n"
+
+    text_ok = (
+        f"🔴 <b>Билет погашен</b>\n\n"
         f"Код: <code>{code}</code>\n"
         f"👤 {ticket.get('holder', '—')}\n"
-        f"🎉 {ticket.get('event_title', '—')}\n\n"
-        f"Погасил: {checker_name}",
+    )
+    if holder_username:
+        text_ok += f"🔗 @{holder_username}\n"
+    text_ok += f"📱 {holder_phone}\n\n"
+    text_ok += (
+        f"🎫 {_ticket_type_label(ticket)}\n"
+        f"🎉 {ticket.get('event_title', '—')}\n"
+        f"📅 {ticket.get('event_date', '—')}\n\n"
+        f"👮 Погасил: {checker_name}\n"
+        f"🕐 {ticket.get('used_at', '—')}"
+    )
+
+    await call.message.edit_text(
+        text_ok,
         reply_markup=kb_ok,
         parse_mode="HTML",
     )

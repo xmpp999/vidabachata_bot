@@ -3695,19 +3695,20 @@ async def admin_archived_tickets_csv(call: CallbackQuery):
     await call.answer()
 
 # ================== ПРОСТАЯ ВЫГРУЗКА ДЛЯ CHECKER'ОВ ==================
+
+
 @dp.callback_query(F.data.startswith("admin:checker_export_menu:"))
 async def admin_checker_export_menu(call: CallbackQuery):
-    """Меню выбора формата для checkers: PDF или XLSX."""
     if call.from_user.id != ADMIN_ID:
         await call.answer("Только для админа", show_alert=True)
         return
 
     parts = call.data.split(":")
-    # admin:checker_export_menu:<ev|all>:<event_id>
+    # admin:checker_export_menu:all:  или  admin:checker_export_menu:ev:<event_id>
     scope = parts[3] if len(parts) > 3 else "all"
     event_id = parts[4] if len(parts) > 4 else ""
 
-    # Считаем, сколько активных билетов
+    # Считаем активные билеты (для этого события или для всех)
     count = 0
     for code, t in tickets.items():
         if t.get("used") or t.get("auto_used"):
@@ -3742,7 +3743,6 @@ async def admin_checker_export_menu(call: CallbackQuery):
     except Exception:
         await call.message.answer(title, reply_markup=kb, parse_mode="HTML")
     await call.answer()
-
 
 def _build_checkers_rows(event_id: str = "") -> list:
     """Собирает строки для выгрузки checker'ов."""

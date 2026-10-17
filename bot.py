@@ -3053,14 +3053,17 @@ def _build_event_tickets_text(event: dict, filtered: list, filter_mode: str, pag
             callback_data=f"admin:export_event_pdf:{event['id']}:{filter_mode}"
         ),
     ])
+
     buttons.append([InlineKeyboardButton(
         text="📋 Список на вход",
         callback_data=f"admin:checker_export_menu:ev:{event['id']}"
     )])
-        buttons.append([InlineKeyboardButton(
+
+    buttons.append([InlineKeyboardButton(
         text="⬅️ К событиям", callback_data="admin:list"
     )])
-        buttons.append([InlineKeyboardButton(
+
+    buttons.append([InlineKeyboardButton(
         text="🏠 На главную", callback_data="main_menu"
     )])
 

@@ -159,7 +159,9 @@ def save_ticket(code: str):
             "event_title": t.get("event_title", ""),
             "event_date": t.get("event_date", ""),
             "issued_at": t.get("issued_at", ""),
+            "partner_code": t.get("partner_code", ""),
         }).execute()
+        
     except Exception as e:
         print(f"[SUPABASE] save_ticket({code}) ошибка: {e}")
 
@@ -353,6 +355,7 @@ def load_data():
                 "event_title": row.get("event_title") or "",
                 "event_date": row.get("event_date") or "",
                 "issued_at": row.get("issued_at") or "",
+                "partner_code": row.get("partner_code") or "",
             }
 
         resp = supabase.table("orders").select("*").execute()
@@ -2954,7 +2957,9 @@ def _build_event_tickets_text(event: dict, filtered: list, filter_mode: str, pag
             used_by = t.get("used_by") or ""
 
             # Цена
+                        # Цена
             price = 0
+            paid_by_name = ""
             for o in orders:
                 if (str(o.get("user_id")) == str(t.get("user_id"))
                         and str(o.get("event_id")) == str(t.get("event_id"))):
@@ -2963,6 +2968,18 @@ def _build_event_tickets_text(event: dict, filtered: list, filter_mode: str, pag
                     except (TypeError, ValueError):
                         price = 0
                     break
+
+            # Для парного билета без своего заказа — берём точного партнёра по partner_code
+            if price == 0 and t.get("type") == "pair":
+                partner_code = t.get("partner_code") or ""
+                if partner_code:
+                    partner_ticket = tickets.get(partner_code)
+                    if partner_ticket:
+                        partner_uid = partner_ticket.get("user_id")
+                        partner_user = users.get(int(partner_uid or 0), {})
+                        partner_uname = partner_user.get("username") or ""
+                        if partner_uname:
+                            paid_by_name = f" (оплачен @{partner_uname})"
 
             # Тип
             type_label = "Парный" if t.get("type") == "pair" else "Обычный"
@@ -2975,7 +2992,7 @@ def _build_event_tickets_text(event: dict, filtered: list, filter_mode: str, pag
                 text += f" (@{username})"
             text += "\n"
             text += f"   📱 {phone}\n"
-            text += f"   🎟 {type_label} · 💰 {price} ₽\n"
+            text += f"   🎟 {type_label} · 💰 {price} ₽{paid_by_name}\n"
             text += f"   🛒 Куплен: {issued_at}\n"
             if used_by:
                 text += f"   👮 Погасил: {used_by}\n"
@@ -4973,6 +4990,7 @@ async def issue_ticket(user_id: int, code: str, ticket_type: str, holder_name: s
         "event_title": event.get("title", ""),
         "event_date": event.get("date_text", ""),
         "issued_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "partner_code": "",
     }
     save_ticket(code)
 
@@ -5056,15 +5074,21 @@ async def process_successful_payment(payment_id: str):
     buyer_code = generate_ticket_code()
     await issue_ticket(user_id, buyer_code, ticket_type, buyer_name, event)
 
-    if ticket_type == "pair" and pending.get("partner_id"):
+        if ticket_type == "pair" and pending.get("partner_id"):
         partner_id = pending["partner_id"]
         if partner_id in users:
             partner = users[partner_id]
             partner_name = f"{partner['name']} {partner['surname']}"
+            partner_code = generate_ticket_code()
             await issue_ticket(
-                partner_id, generate_ticket_code(),
+                partner_id, partner_code,
                 ticket_type, partner_name, event
             )
+            # Связываем билеты между собой
+            tickets[buyer_code]["partner_code"] = partner_code
+            tickets[partner_code]["partner_code"] = buyer_code
+            save_ticket(buyer_code)
+            save_ticket(partner_code)
 
     buyer_user = users.get(user_id, {})
     buyer_full_name = " ".join(filter(None, [

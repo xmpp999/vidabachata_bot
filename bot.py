@@ -91,6 +91,7 @@ settings = {
 
 
 
+
 # ================== ТОЧЕЧНОЕ СОХРАНЕНИЕ ==================
 
 def save_user(uid: int):
@@ -209,6 +210,7 @@ def delete_checker(chk_id: str):
         supabase.table("checkers").delete().eq("id", db_id).execute()
     except Exception as e:
         print(f"[SUPABASE] delete_checker({chk_id}) ошибка: {e}")
+
 
 
 
@@ -612,7 +614,6 @@ def get_reg_attempts_text(limit: int = 30) -> str:
             text += f"   └ причина: {a.get('reason')}\n"
 
     return text
-
 
 
 
@@ -1741,7 +1742,6 @@ async def show_checker_ticket_card(message: Message, code: str, ticket: dict):
 @dp.callback_query(F.data == "checker:noop")
 async def checker_noop(call: CallbackQuery):
     await call.answer("Этот билет уже недействителен", show_alert=True)
-
 
 
 
@@ -3591,7 +3591,6 @@ async def admin_archived_tickets_csv(call: CallbackQuery):
 
 
 
-
 # ================== ФУНКЦИИ ЭКСПОРТА ==================
 def _export_tickets_data(tickets_filtered: list) -> list:
     rows = []
@@ -3800,12 +3799,12 @@ async def admin_export_event_xlsx(call: CallbackQuery):
 
     parts = call.data.split(":")
     try:
-        event_id = parts[1]
+        event_id = parts[2]
     except IndexError:
         await call.answer("Ошибка данных", show_alert=True)
         return
 
-    filter_mode = parts[2] if len(parts) > 2 else "all"
+    filter_mode = parts[3] if len(parts) > 3 else "all"
 
     event = next((e for e in events if str(e["id"]) == str(event_id)), None)
     if not event:
@@ -3857,12 +3856,12 @@ async def admin_export_event_pdf(call: CallbackQuery):
 
     parts = call.data.split(":")
     try:
-        event_id = parts[1]
+        event_id = parts[2]
     except IndexError:
         await call.answer("Ошибка данных", show_alert=True)
         return
 
-    filter_mode = parts[2] if len(parts) > 2 else "all"
+    filter_mode = parts[3] if len(parts) > 3 else "all"
 
     event = next((e for e in events if str(e["id"]) == str(event_id)), None)
     if not event:
@@ -4111,7 +4110,6 @@ async def admin_export_csv_filtered(call: CallbackQuery):
         caption=f"📋 CSV: {len(filtered)} билетов ({mode})",
     )
     await call.answer()
-
 
 
 
@@ -5271,6 +5269,18 @@ async def main():
 
     me = await bot.get_me()
     print(f"✅ Бот @{me.username} работает")
+
+    # Сбрасываем старые getUpdates и webhook перед polling
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+        print("✅ Webhook удалён, старые обновления сброшены")
+    except Exception as e:
+        print(f"⚠️ delete_webhook: {e}")
+
+    # Пауза, чтобы Telegram успел «забыть» старый инстанс
+    await asyncio.sleep(2)
+
+    print("🚀 Запускаю polling...")
     await dp.start_polling(bot)
 
 

@@ -4297,13 +4297,21 @@ async def admin_reg_attempts(call: CallbackQuery):
 @dp.callback_query(F.data == "show_events")
 async def show_events(call: CallbackQuery):
     now = datetime.now()
-    upcoming = [
-        e for e in events
-        if e.get("active", True) and datetime.fromisoformat(e["start_dt"]) > now
-    ]
+    upcoming = []
+    for e in events:
+        if not e.get("active", True):
+            continue
+        try:
+            start = datetime.fromisoformat(e.get("start_dt") or "")
+        except (ValueError, TypeError):
+            print(f"[SHOW_EVENTS] Пропущено {e.get('id')} — битый start_dt={e.get('start_dt')!r}")
+            continue
+        if start > now:
+            upcoming.append(e)
 
     if not upcoming:
         await call.message.answer("📭 Пока нет доступных событий.")
+        await call.answer()
         return
 
     buttons = []
@@ -4325,8 +4333,7 @@ async def show_events(call: CallbackQuery):
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
         parse_mode="HTML",
     )
-
-
+    await call.answer()
 
 
 
@@ -4811,31 +4818,43 @@ async def event_selected(call: CallbackQuery, state: FSMContext):
 # ================== ОПЛАТА ЧЕРЕЗ ЮKASSA ==================
 @dp.callback_query(F.data == "ticket:single", Reg.ticket_type)
 async def ticket_single(call: CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    event = data.get("event")
-    if not event:
-        await call.answer("Ошибка")
-        return
-    await state.update_data(ticket_type="single", price=event["price_single"])
-    await go_to_payment(call.message, state)
-
-
-@dp.callback_query(F.data == "ticket:single", Reg.ticket_type)
-async def ticket_single(call: CallbackQuery, state: FSMContext):
     try:
         data = await state.get_data()
         event = data.get("event")
         print(f"[TICKET_SINGLE] user={call.from_user.id}, event={event.get('id') if event else None}")
-        
+
         if not event:
             await call.answer("Ошибка: событие не найдено", show_alert=True)
             return
-        
+
         await state.update_data(ticket_type="single", price=event["price_single"])
         await call.answer()
         await go_to_payment(call.message, state)
     except Exception as e:
         print(f"[TICKET_SINGLE] Ошибка: {e}")
+        await call.answer(f"Ошибка: {e}", show_alert=True)
+
+
+@dp.callback_query(F.data == "ticket:pair", Reg.ticket_type)
+async def ticket_pair(call: CallbackQuery, state: FSMContext):
+    try:
+        data = await state.get_data()
+        event = data.get("event")
+        print(f"[TICKET_PAIR] user={call.from_user.id}, event={event.get('id') if event else None}")
+
+        if not event or event.get("price_pair", 0) <= 0:
+            await call.answer("Парные недоступны", show_alert=True)
+            return
+
+        await state.update_data(ticket_type="pair", price=event["price_pair"])
+        await call.message.answer(
+            "🎟 Введите <b>@username</b> второго участника:",
+            parse_mode="HTML",
+        )
+        await state.set_state(Reg.partner_input)
+        await call.answer()
+    except Exception as e:
+        print(f"[TICKET_PAIR] Ошибка: {e}")
         await call.answer(f"Ошибка: {e}", show_alert=True)
 
 

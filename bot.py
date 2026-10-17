@@ -5134,7 +5134,17 @@ async def process_successful_payment(payment_id: str):
         return
 
     ticket_type = pending["ticket_type"]
-    buyer_name = pending["name"] or "Клиент"
+    buyer_user = users.get(user_id, {})
+    buyer_full_name = " ".join(filter(None, [
+        (buyer_user.get("name") or "").strip(),
+        (buyer_user.get("surname") or "").strip(),
+])).strip()
+
+    buyer_name = (
+        buyer_full_name
+        or pending["name"]
+        or (f"@{buyer_user.get('username', '')}" if buyer_user.get("username") else "Клиент")
+)
 
     order = {
         "order_id": next_order_id(),

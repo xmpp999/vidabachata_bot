@@ -649,7 +649,10 @@ def parse_event_date(text: str):
 
 
 def sales_closed(event: dict) -> bool:
-    start_dt = datetime.fromisoformat(event["start_dt"])
+    try:
+        start_dt = datetime.fromisoformat(event.get("start_dt") or "")
+    except (ValueError, TypeError):
+        return True
     stop_before = timedelta(hours=settings.get("sales_stop_hours", 1))
     return datetime.now() >= start_dt - stop_before
 

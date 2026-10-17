@@ -649,10 +649,7 @@ def parse_event_date(text: str):
 
 
 def sales_closed(event: dict) -> bool:
-    try:
-        start_dt = datetime.fromisoformat(event.get("start_dt") or "")
-    except (ValueError, TypeError):
-        return True
+    start_dt = datetime.fromisoformat(event["start_dt"])
     stop_before = timedelta(hours=settings.get("sales_stop_hours", 1))
     return datetime.now() >= start_dt - stop_before
 
@@ -3948,6 +3945,389 @@ async def admin_export_event_pdf(call: CallbackQuery):
 
 
 # ========== КОНЕЦ ЧАСТИ 12 ==========
+
+
+# ================== МЕНЮ ЭКСПОРТА (общее) ==================
+@dp.callback_query(F.data == "admin:export")
+async def admin_export_menu(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("Только для админа", show_alert=True)
+        return
+
+    total = len(tickets)
+    active = sum(1 for t in tickets.values() if not t.get("used") and not t.get("auto_used"))
+    used = sum(1 for t in tickets.values() if t.get("used") and not t.get("auto_used"))
+    burned = sum(1 for t in tickets.values() if t.get("auto_used"))
+
+    text = (
+        f"📤 <b>Выгрузка билетов</b>\n\n"
+        f"Всего: <b>{total}</b>\n"
+        f"🟢 Активных: <b>{active}</b>\n"
+        f"🔴 Погашено: <b>{used}</b>\n"
+        f"⚪ Сгорело: <b>{burned}</b>\n\n"
+        f"Выберите формат:"
+    )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 Excel (XLSX)", callback_data="admin:export:xlsx:all")],
+        [InlineKeyboardButton(text="📄 PDF", callback_data="admin:export:pdf:all")],
+        [InlineKeyboardButton(text="📦 ZIP с QR-кодами", callback_data="admin:export:zip:all")],
+        [InlineKeyboardButton(text="📋 CSV", callback_data="admin:export:csv:all")],
+        [InlineKeyboardButton(text="🎯 Фильтры", callback_data="admin:export:filter")],
+        [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin:back")],
+    ])
+
+    await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+
+
+@dp.callback_query(F.data == "admin:export:filter")
+async def admin_export_filter(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("Только для админа", show_alert=True)
+        return
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔴 Только погашенные", callback_data="admin:export:xlsx:used")],
+        [InlineKeyboardButton(text="🟢 Только активные", callback_data="admin:export:xlsx:active")],
+        [InlineKeyboardButton(text="⚪ Только сгоревшие", callback_data="admin:export:xlsx:burned")],
+        [InlineKeyboardButton(text="🎟 Только парные", callback_data="admin:export:xlsx:pair")],
+        [InlineKeyboardButton(text="🎫 Только обычные", callback_data="admin:export:xlsx:single")],
+        [InlineKeyboardButton(text="🎉 За конкретное событие", callback_data="admin:export:byevent")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin:export")],
+    ])
+
+    await call.message.edit_text(
+        "🎯 <b>Фильтры билетов</b>\n\n"
+        "Выберите, какие билеты включить в выгрузку:",
+        reply_markup=kb, parse_mode="HTML",
+    )
+
+
+@dp.callback_query(F.data == "admin:export:byevent")
+async def admin_export_byevent(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("Только для админа", show_alert=True)
+        return
+
+    if not events:
+        await call.answer("Нет событий", show_alert=True)
+        return
+
+    buttons = []
+    for e in events:
+        cnt = sum(1 for t in tickets.values() if str(t.get("event_id")) == str(e["id"]))
+        buttons.append([InlineKeyboardButton(
+            text=f"🎉 {e['title'][:30]} ({cnt})",
+            callback_data=f"admin:export:event:{e['id']}"
+        )])
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="admin:export:filter")])
+
+    await call.message.edit_text(
+        "🎉 <b>Выберите событие</b>:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+        parse_mode="HTML",
+    )
+
+
+@dp.callback_query(F.data.startswith("admin:export:event:"))
+async def admin_export_event(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("Только для админа", show_alert=True)
+        return
+
+    event_id = call.data.split(":", 3)[3]
+    filtered = [(c, t) for c, t in tickets.items() if str(t.get("event_id")) == str(event_id)]
+
+    if not filtered:
+        await call.answer("Нет билетов на это событие", show_alert=True)
+        return
+
+    ev = next((e for e in events if str(e["id"]) == str(event_id)), None)
+    title = ev["title"] if ev else "event"
+
+    rows = _export_tickets_data(filtered)
+    xlsx_bytes = make_xlsx(_tickets_headers(), rows)
+
+    await call.message.answer_document(
+        BufferedInputFile(xlsx_bytes, filename=f"tickets_{event_id}.xlsx"),
+        caption=f"📊 Билеты на «{title}» ({len(filtered)} шт)",
+    )
+    await call.answer()
+
+
+@dp.callback_query(F.data.startswith("admin:export:xlsx:"))
+async def admin_export_xlsx(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("Только для админа", show_alert=True)
+        return
+
+    mode = call.data.split(":", 3)[3]
+    filtered = _apply_filter(mode)
+
+    if not filtered:
+        await call.answer("Нет билетов по фильтру", show_alert=True)
+        return
+
+    rows = _export_tickets_data(filtered)
+    xlsx_bytes = make_xlsx(_tickets_headers(), rows)
+
+    await call.message.answer_document(
+        BufferedInputFile(xlsx_bytes, filename=f"tickets_{mode}.xlsx"),
+        caption=f"📊 Excel: {len(filtered)} билетов ({mode})",
+    )
+    await call.answer()
+
+
+@dp.callback_query(F.data.startswith("admin:export:pdf:"))
+async def admin_export_pdf(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("Только для админа", show_alert=True)
+        return
+
+    mode = call.data.split(":", 3)[3]
+    filtered = _apply_filter(mode)
+
+    if not filtered:
+        await call.answer("Нет билетов по фильтру", show_alert=True)
+        return
+
+    rows = _export_tickets_data(filtered)
+    pdf_bytes = make_pdf(_tickets_headers(), rows, title=f"Билеты ({mode}, {len(filtered)} шт)")
+
+    await call.message.answer_document(
+        BufferedInputFile(pdf_bytes, filename=f"tickets_{mode}.pdf"),
+        caption=f"📄 PDF: {len(filtered)} билетов ({mode})",
+    )
+    await call.answer()
+
+
+@dp.callback_query(F.data.startswith("admin:export:zip:"))
+async def admin_export_zip(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("Только для админа", show_alert=True)
+        return
+
+    mode = call.data.split(":", 3)[3]
+    filtered = _apply_filter(mode)
+
+    if not filtered:
+        await call.answer("Нет билетов по фильтру", show_alert=True)
+        return
+
+    if len(filtered) > 200:
+        await call.answer(f"Слишком много билетов ({len(filtered)}). Максимум 200.", show_alert=True)
+        return
+
+    await call.answer("📦 Генерирую ZIP...")
+    zip_bytes = make_zip_qr(filtered)
+
+    await call.message.answer_document(
+        BufferedInputFile(zip_bytes, filename=f"qr_codes_{mode}.zip"),
+        caption=f"📦 ZIP с QR: {len(filtered)} билетов ({mode})",
+    )
+
+
+@dp.callback_query(F.data.startswith("admin:export:csv:"))
+async def admin_export_csv_filtered(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("Только для админа", show_alert=True)
+        return
+
+    mode = call.data.split(":", 3)[3]
+    filtered = _apply_filter(mode)
+
+    if not filtered:
+        await call.answer("Нет билетов по фильтру", show_alert=True)
+        return
+
+    rows = _export_tickets_data(filtered)
+    csv_bytes = make_csv(_tickets_headers(), rows)
+
+    await call.message.answer_document(
+        BufferedInputFile(csv_bytes, filename=f"tickets_{mode}.csv"),
+        caption=f"📋 CSV: {len(filtered)} билетов ({mode})",
+    )
+    await call.answer()
+
+
+
+
+# ================== ЧЁРНЫЙ СПИСОК (АДМИН) ==================
+@dp.callback_query(F.data == "admin:blacklist")
+async def admin_blacklist_menu(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("Только для админа", show_alert=True)
+        return
+
+    text = get_blacklist_text()[:4000]
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Добавить username", callback_data="admin:bl:add_username")],
+        [InlineKeyboardButton(text="📱 Добавить телефон", callback_data="admin:bl:add_phone")],
+        [InlineKeyboardButton(text="🗑 Удалить", callback_data="admin:bl:remove")],
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data="admin:blacklist")],
+        [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin:back")],
+    ])
+    await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+
+
+@dp.callback_query(F.data == "admin:bl:add_username")
+async def admin_bl_add_username(call: CallbackQuery, state: FSMContext):
+    await state.update_data(bl_type="username")
+    await call.message.edit_text(
+        "🚫 <b>Добавление в ЧС</b>\n\n"
+        "Шаг 1/2. Отправьте <b>@username</b>:\n\n"
+        "Для отмены — /admin",
+        parse_mode="HTML",
+    )
+    await state.set_state(Admin.blacklist_add_username)
+
+
+@dp.message(Admin.blacklist_add_username)
+async def admin_bl_save_username(message: Message, state: FSMContext):
+    if message.text == "/admin":
+        await state.clear()
+        await show_admin_menu(message, state)
+        return
+
+    value = message.text.strip()
+    if not value.startswith("@"):
+        value = "@" + value
+
+    await state.update_data(bl_value=value)
+    await state.set_state(Admin.blacklist_reason)
+    await message.answer("Шаг 2/2. Причина (или <code>-</code>):", parse_mode="HTML")
+
+
+@dp.callback_query(F.data == "admin:bl:add_phone")
+async def admin_bl_add_phone(call: CallbackQuery, state: FSMContext):
+    await state.update_data(bl_type="phone")
+    await call.message.edit_text(
+        "🚫 <b>Добавление в ЧС</b>\n\n"
+        "Шаг 1/2. Отправьте <b>номер телефона</b>:\n\n"
+        "Для отмены — /admin",
+        parse_mode="HTML",
+    )
+    await state.set_state(Admin.blacklist_add_phone)
+
+
+@dp.message(Admin.blacklist_add_phone)
+async def admin_bl_save_phone(message: Message, state: FSMContext):
+    if message.text == "/admin":
+        await state.clear()
+        await show_admin_menu(message, state)
+        return
+
+    value = message.text.strip()
+    await state.update_data(bl_value=value)
+    await state.set_state(Admin.blacklist_reason)
+    await message.answer("Шаг 2/2. Причина (или <code>-</code>):", parse_mode="HTML")
+
+
+@dp.message(Admin.blacklist_reason)
+async def admin_bl_save_reason(message: Message, state: FSMContext):
+    reason = message.text.strip()
+    if reason == "-":
+        reason = ""
+
+    data = await state.get_data()
+    bl_type = data.get("bl_type", "username")
+    bl_value = data.get("bl_value", "")
+
+    ok = add_to_blacklist(bl_type, bl_value, reason)
+    await state.clear()
+
+    if ok:
+        await message.answer(f"✅ Добавлено в ЧС: <code>{bl_value}</code>", parse_mode="HTML")
+    else:
+        await message.answer("⚠️ Уже в ЧС.")
+
+    await show_admin_menu(message, state)
+
+
+@dp.callback_query(F.data == "admin:bl:remove")
+async def admin_bl_remove_start(call: CallbackQuery):
+    if not blacklist:
+        await call.answer("ЧС пуст", show_alert=True)
+        return
+
+    buttons = []
+    for key, item in list(blacklist.items())[:30]:
+        icon = "📱" if item.get("type") == "phone" else "👤"
+        buttons.append([InlineKeyboardButton(
+            text=f"🗑 {icon} {item.get('value')}",
+            callback_data=f"admin:bl:del:{item.get('value')}"
+        )])
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="admin:blacklist")])
+
+    await call.message.edit_text(
+        "🗑 Выберите запись для удаления:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+    )
+
+
+@dp.callback_query(F.data.startswith("admin:bl:del:"))
+async def admin_bl_remove_confirm(call: CallbackQuery):
+    value = call.data.split(":", 3)[3]
+    ok = remove_from_blacklist(value)
+    if ok:
+        await call.answer("Удалено")
+    else:
+        await call.answer("Не найдено", show_alert=True)
+    await admin_blacklist_menu(call)
+
+
+# ================== ПОПЫТКИ РЕГИСТРАЦИИ (АДМИН) ==================
+@dp.callback_query(F.data == "admin:reg_attempts")
+async def admin_reg_attempts(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("Только для админа", show_alert=True)
+        return
+
+    text = get_reg_attempts_text(limit=30)[:4000]
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data="admin:reg_attempts")],
+        [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin:back")],
+    ])
+    await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+
+
+# ================== МЕРОПРИЯТИЯ (КЛИЕНТ) ==================
+@dp.callback_query(F.data == "show_events")
+async def show_events(call: CallbackQuery):
+    now = datetime.now()
+    upcoming = [
+        e for e in events
+        if e.get("active", True) and datetime.fromisoformat(e["start_dt"]) > now
+    ]
+
+    if not upcoming:
+        await call.message.answer("📭 Пока нет доступных событий.")
+        return
+
+    buttons = []
+    for e in upcoming:
+        buttons.append([InlineKeyboardButton(
+            text=f"🎉 {e['title']} — {e['date_text']}",
+            callback_data=f"event:{e['id']}"
+        )])
+
+    buttons.append([InlineKeyboardButton(
+        text="🔄 Обновить", callback_data="show_events"
+    )])
+    buttons.append([InlineKeyboardButton(
+        text="🏠 На главную", callback_data="main_menu"
+    )])
+
+    await call.message.answer(
+        "🎉 <b>Выберите мероприятие:</b>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+        parse_mode="HTML",
+    )
+
+
+
 
 
 # ================== МОИ БИЛЕТЫ (КЛИЕНТ) ==================

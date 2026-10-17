@@ -3043,7 +3043,7 @@ def _build_event_tickets_text(event: dict, filtered: list, filter_mode: str, pag
         buttons.append(nav)
 
     # Действия
-    buttons.append([
+       buttons.append([
         InlineKeyboardButton(
             text="📥 XLSX",
             callback_data=f"admin:export_event_xlsx:{event['id']}:{filter_mode}"
@@ -3053,6 +3053,10 @@ def _build_event_tickets_text(event: dict, filtered: list, filter_mode: str, pag
             callback_data=f"admin:export_event_pdf:{event['id']}:{filter_mode}"
         ),
     ])
+    buttons.append([InlineKeyboardButton(
+        text="📋 Список на вход",
+        callback_data=f"admin:checker_export_menu:ev:{event['id']}"
+    )])
     buttons.append([InlineKeyboardButton(
         text="⬅️ К событиям", callback_data="admin:list"
     )])
@@ -3687,7 +3691,150 @@ async def admin_archived_tickets_csv(call: CallbackQuery):
     )
     await call.answer()
 
+# ================== ПРОСТАЯ ВЫГРУЗКА ДЛЯ CHECKER'ОВ ==================
+@dp.callback_query(F.data.startswith("admin:checker_export_menu:"))
+async def admin_checker_export_menu(call: CallbackQuery):
+    """Меню выбора формата для checkers: PDF или XLSX."""
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("Только для админа", show_alert=True)
+        return
 
+    parts = call.data.split(":")
+    # admin:checker_export_menu:<ev|all>:<event_id>
+    scope = parts[3] if len(parts) > 3 else "all"
+    event_id = parts[4] if len(parts) > 4 else ""
+
+    # Считаем, сколько активных билетов
+    count = 0
+    for code, t in tickets.items():
+        if t.get("used") or t.get("auto_used"):
+            continue
+        if event_id and str(t.get("event_id")) != str(event_id):
+            continue
+        count += 1
+
+    title = "📋 <b>Список на вход</b>\n\n"
+    if event_id:
+        ev = next((e for e in events if str(e["id"]) == str(event_id)), None)
+        if ev:
+            title += f"🎉 {ev['title']}\n📅 {ev['date_text']}\n"
+    else:
+        title += "🌐 Все события\n"
+    title += f"\nАктивных билетов: <b>{count}</b>\n\nВыберите формат:"
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="📊 Excel (XLSX)",
+            callback_data=f"admin:checker_export_xlsx:{scope}:{event_id}"
+        )],
+        [InlineKeyboardButton(
+            text="📄 PDF",
+            callback_data=f"admin:checker_export_pdf:{scope}:{event_id}"
+        )],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin:back")],
+    ])
+
+    try:
+        await call.message.edit_text(title, reply_markup=kb, parse_mode="HTML")
+    except Exception:
+        await call.message.answer(title, reply_markup=kb, parse_mode="HTML")
+    await call.answer()
+
+
+def _build_checkers_rows(event_id: str = "") -> list:
+    """Собирает строки для выгрузки checker'ов."""
+    rows = []
+    for code, t in tickets.items():
+        if t.get("used") or t.get("auto_used"):
+            continue
+        if event_id and str(t.get("event_id")) != str(event_id):
+            continue
+
+        owner = users.get(t.get("user_id"), {})
+        name = (owner.get("name") or "").strip()
+        surname = (owner.get("surname") or "").strip()
+        holder = f"{name} {surname}".strip() or t.get("holder") or "—"
+
+        price = 0
+        for o in orders:
+            if (str(o.get("user_id")) == str(t.get("user_id"))
+                    and str(o.get("event_id")) == str(t.get("event_id"))):
+                try:
+                    price = int(o.get("price", 0) or 0)
+                except (TypeError, ValueError):
+                    price = 0
+                break
+
+        rows.append([code, holder, t.get("event_date", ""), price, "активен"])
+    return rows
+
+
+def _checkers_headers_ru():
+    return ["Код билета", "Гость", "Дата вечеринки", "Цена", "Статус"]
+
+
+@dp.callback_query(F.data.startswith("admin:checker_export_xlsx:"))
+async def admin_checker_export_xlsx(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("Только для админа", show_alert=True)
+        return
+
+    parts = call.data.split(":")
+    event_id = parts[4] if len(parts) > 4 else ""
+    rows = _build_checkers_rows(event_id)
+
+    if not rows:
+        await call.answer("Нет активных билетов", show_alert=True)
+        return
+
+    xlsx_bytes = make_xlsx(_checkers_headers_ru(), rows)
+    if event_id:
+        ev = next((e for e in events if str(e["id"]) == str(event_id)), None)
+        safe_name = _safe_filename(ev["title"]) if ev else "event"
+        filename = f"checkers_{safe_name}.xlsx"
+    else:
+        filename = "checkers_all.xlsx"
+
+    await call.message.answer_document(
+        BufferedInputFile(xlsx_bytes, filename=filename),
+        caption=f"📋 Список на вход (XLSX): {len(rows)} билетов",
+    )
+    await call.answer()
+
+
+@dp.callback_query(F.data.startswith("admin:checker_export_pdf:"))
+async def admin_checker_export_pdf(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("Только для админа", show_alert=True)
+        return
+
+    parts = call.data.split(":")
+    event_id = parts[4] if len(parts) > 4 else ""
+    rows = _build_checkers_rows(event_id)
+
+    if not rows:
+        await call.answer("Нет активных билетов", show_alert=True)
+        return
+
+    title = "Список на вход"
+    if event_id:
+        ev = next((e for e in events if str(e["id"]) == str(event_id)), None)
+        if ev:
+            title = f"{ev['title']} — список на вход"
+
+    pdf_bytes = make_pdf(_checkers_headers_ru(), rows, title=title)
+    if event_id:
+        ev = next((e for e in events if str(e["id"]) == str(event_id)), None)
+        safe_name = _safe_filename(ev["title"]) if ev else "event"
+        filename = f"checkers_{safe_name}.pdf"
+    else:
+        filename = "checkers_all.pdf"
+
+    await call.message.answer_document(
+        BufferedInputFile(pdf_bytes, filename=filename),
+        caption=f"📋 Список на вход (PDF): {len(rows)} билетов",
+    )
+    await call.answer()
 
 
 # ================== ФУНКЦИИ ЭКСПОРТА ==================
@@ -4069,6 +4216,7 @@ async def admin_export_menu(call: CallbackQuery):
         [InlineKeyboardButton(text="📄 PDF", callback_data="admin:export:pdf:all")],
         [InlineKeyboardButton(text="📦 ZIP с QR-кодами", callback_data="admin:export:zip:all")],
         [InlineKeyboardButton(text="📋 CSV", callback_data="admin:export:csv:all")],
+        [InlineKeyboardButton(text="📋 Список на вход", callback_data="admin:checker_export_menu:all:")],
         [InlineKeyboardButton(text="🎯 Фильтры", callback_data="admin:export:filter")],
         [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin:back")],
     ])

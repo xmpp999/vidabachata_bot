@@ -3633,8 +3633,8 @@ async def admin_transfers(call: CallbackQuery):
         )
         return
 
-    text = f"📋 <b>История передач</b> ({len(ticket_transfers)})\n\n"
-    for tr in ticket_transfers[:20]:
+        text = f"📋 <b>История передач</b> ({len(ticket_transfers)})\n\n"
+        for tr in ticket_transfers[:20]:
         from_name = tr.get("from_name") or "—"
         from_uname = tr.get("from_username") or ""
         to_name = tr.get("to_name") or "—"
@@ -3648,6 +3648,26 @@ async def admin_transfers(call: CallbackQuery):
         text += f"\n   👤 Кому: {to_name}"
         if to_uname:
             text += f" (@{to_uname})"
+
+        # Цена и тип билета
+        tr_price = 0
+        tr_type = ""
+        tr_ticket = tickets.get(tr.get("ticket_code", ""))
+        if tr_ticket:
+            tr_type = "Парный" if tr_ticket.get("type") == "pair" else "Обычный"
+            for o in orders:
+                if (str(o.get("user_id")) == str(tr.get("from_user_id"))
+                        and str(o.get("event_id")) == str(tr.get("event_id"))):
+                    try:
+                        tr_price = int(o.get("price", 0) or 0)
+                    except (TypeError, ValueError):
+                        tr_price = 0
+                    break
+        if tr_type:
+            text += f"\n   🎫 {tr_type}"
+            if tr_price > 0:
+                text += f" · 💰 {tr_price} ₽"
+
         text += (
             f"\n   🎉 {tr.get('event_title', '—')}\n"
             f"   🕐 {tr.get('transferred_at', '—')}\n\n"

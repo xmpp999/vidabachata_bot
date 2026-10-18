@@ -4676,7 +4676,7 @@ async def show_events(call: CallbackQuery):
 # ================== МОИ БИЛЕТЫ (КЛИЕНТ) ==================
 @dp.callback_query(F.data == "my_tickets")
 async def my_tickets(call: CallbackQuery):
-    """Показывает все билеты текущего пользователя."""
+    """Показывает список событий, где у пользователя есть билеты."""
     user_id = call.from_user.id
 
     all_user_tickets = [
@@ -4697,68 +4697,151 @@ async def my_tickets(call: CallbackQuery):
         )
         return
 
-    user_tickets = [
-        (code, t) for code, t in all_user_tickets
-        if not is_ticket_archived(t)
-    ]
+    # Группируем по event_id
+    by_event = {}
+    for code, t in all_user_tickets:
+        ev_id = str(t.get("event_id") or "")
+        if not ev_id:
+            continue
+        if ev_id not in by_event:
+            by_event[ev_id] = {
+                "event_title": t.get("event_title", "—"),
+                "event_date": t.get("event_date", "—"),
+                "tickets": [],
+            }
+        by_event[ev_id]["tickets"].append((code, t))
 
-    # ✅ Защита от None — используем `or ""`
-    def sort_key(kv):
-        _, t = kv
-        used_at = t.get("used_at") or ""
-        event_date = t.get("event_date") or ""
-        if t.get("auto_used"):
-            return (2, used_at)
-        if t.get("used"):
-            return (1, used_at)
-        return (0, event_date)
-
-    user_tickets.sort(key=sort_key)
-
-    active_cnt = sum(1 for _, t in user_tickets if not t.get("used") and not t.get("auto_used"))
-    used_cnt = sum(1 for _, t in user_tickets if t.get("used") and not t.get("auto_used"))
-    burned_cnt = sum(1 for _, t in user_tickets if t.get("auto_used"))
-    archived_cnt = sum(1 for _, t in all_user_tickets if is_ticket_archived(t))
+    # Статистика
+    active_cnt = sum(1 for _, t in all_user_tickets if not t.get("used") and not t.get("auto_used"))
+    used_cnt = sum(1 for _, t in all_user_tickets if t.get("used") and not t.get("auto_used"))
+    burned_cnt = sum(1 for _, t in all_user_tickets if t.get("auto_used"))
 
     text = (
-        f"🎫 <b>Мои билеты</b>\n\n"
-        f"Всего: <b>{len(user_tickets)}</b>\n"
+        f"🎟 <b>Мои билеты</b>\n\n"
+        f"Всего: <b>{len(all_user_tickets)}</b>\n"
         f"🟢 Активных: <b>{active_cnt}</b>\n"
         f"🔴 Использовано: <b>{used_cnt}</b>\n"
         f"⚪ Сгорело: <b>{burned_cnt}</b>\n\n"
+        f"Выберите событие:"
     )
 
     buttons = []
-    for code, t in user_tickets:
-        status = get_ticket_status_icon(t)
 
-        if t.get("auto_used"):
-            status_label = " (сгорел)"
+    # Сортируем события по дате (сначала ближайшие)
+    sorted_events = sorted(
+        by_event.items(),
+        key=lambda kv: kv[1]["event_date"] or "",
+    )
+
+    for ev_id, info in sorted_events:
+        ev_tickets = info["tickets"]
+        total = len(ev_tickets)
+        ev_active = sum(1 for _, t in ev_tickets if not t.get("used") and not t.get("auto_used"))
+        ev_used = sum(1 for _, t in ev_tickets if t.get("used") and not t.get("auto_used"))
+        ev_burned = sum(1 for _, t in ev_tickets if t.get("auto_used"))
+
+        # Иконка статуса
+        if ev_active > 0:
+            icon = "🟢"
+        elif ev_used > 0:
+            icon = "🔴"
         else:
-            status_label = ""
+            icon = "⚪"
 
+        # Короткое название (до 30 символов)
+        title_short = info["event_title"][:30]
+        if len(info["event_title"]) > 30:
+            title_short += "…"
+
+        buttons.append([InlineKeyboardButton(
+            text=f"{icon} {title_short} ({total})",
+            callback_data=f"my_event:{ev_id}"
+        )])
+
+    buttons.append([InlineKeyboardButton(text="🔄 Обновить", callback_data="my_tickets")])
+
+    # Архив билетов (если есть)
+    archived_cnt = sum(1 for _, t in all_user_tickets if is_ticket_archived(t))
+    if archived_cnt > 0:
+        buttons.append([InlineKeyboardButton(
+            text=f"📦 Архив билетов ({archived_cnt})",
+            callback_data="my_tickets_archive"
+        )])
+
+    buttons.append([InlineKeyboardButton(text="🎉 Мероприятия", callback_data="show_events")])
+    buttons.append([InlineKeyboardButton(text="🏠 На главную", callback_data="main_menu")])
+
+    await call.message.answer(
+        text,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+        parse_mode="HTML",
+    )
+
+@dp.callback_query(F.data.startswith("my_event:"))
+async def my_event_tickets(call: CallbackQuery):
+    """Показывает билеты конкретного события."""
+    event_id = call.data.split(":", 1)[1]
+    user_id = call.from_user.id
+
+    event = next((e for e in events if str(e["id"]) == str(event_id)), None)
+    if not event:
+        await call.answer("Событие не найдено", show_alert=True)
+        return
+
+    ev_tickets = [
+        (code, t) for code, t in tickets.items()
+        if str(t.get("user_id")) == str(user_id)
+        and str(t.get("event_id")) == str(event_id)
+    ]
+
+    if not ev_tickets:
+        await call.answer("Билетов на это событие нет", show_alert=True)
+        return
+
+    def sort_key(kv):
+        _, t = kv
+        if t.get("auto_used"):
+            return (2, t.get("used_at") or "")
+        if t.get("used"):
+            return (1, t.get("used_at") or "")
+        return (0, t.get("event_date") or "")
+
+    ev_tickets.sort(key=sort_key)
+
+    active = sum(1 for _, t in ev_tickets if not t.get("used") and not t.get("auto_used"))
+    used = sum(1 for _, t in ev_tickets if t.get("used") and not t.get("auto_used"))
+    burned = sum(1 for _, t in ev_tickets if t.get("auto_used"))
+
+    text = (
+        f"🎉 <b>{event['title']}</b>\n"
+        f"📅 {event['date_text']}\n\n"
+        f"🎫 Билетов: <b>{len(ev_tickets)}</b>\n"
+        f"🟢 Активных: <b>{active}</b>\n"
+        f"🔴 Погашено: <b>{used}</b>\n"
+        f"⚪ Сгорело: <b>{burned}</b>\n\n"
+    )
+
+    buttons = []
+    for code, t in ev_tickets:
+        status = get_ticket_status_icon(t)
         type_label = "Парный" if t.get("type") == "pair" else "Обычный"
-        event_title = t.get("event_title", "—")
-        event_date = t.get("event_date", "—")
         issued_at = t.get("issued_at", "—")
+        holder = t.get("holder", "—")
 
-                # Ищем историю передач для этого билета
-        transfer_note = ""
-        for tr in ticket_transfers:
-            if tr.get("ticket_code") == code:
-                if str(tr.get("to_user_id")) == str(user_id) and str(tr.get("from_user_id")) != str(user_id):
-                    transfer_note = f"   🎁 Получен от: {tr.get('from_name', '—')}"
-                    if tr.get("from_username"):
-                        transfer_note += f" (@{tr.get('from_username')})"
-                    transfer_note += "\n"
+        paid_note = ""
+        if t.get("type") == "pair" and t.get("partner_code"):
+            partner_ticket = tickets.get(t.get("partner_code"))
+            if partner_ticket:
+                partner_uid = partner_ticket.get("user_id")
+                partner_user = users.get(int(partner_uid or 0), {})
+                partner_uname = partner_user.get("username") or ""
+                if partner_uname and str(partner_ticket.get("user_id")) != str(user_id):
+                    paid_note = f" (оплачен @{partner_uname})"
 
         text += (
-            f"{status} <code>{code}</code>{status_label}\n"
-            f"   🎉 {event_title}\n"
-            f"   📅 {event_date}\n"
-            f"   🎟 {type_label}\n"
-            f"   🛒 Куплен: {issued_at}\n"
-            f"{transfer_note}\n"
+            f"{status} <code>{code}</code> · {type_label}{paid_note}\n"
+            f"   👤 {holder}\n"
+            f"   🛒 {issued_at}\n\n"
         )
 
         if not t.get("used") and not t.get("auto_used"):
@@ -4768,37 +4851,24 @@ async def my_tickets(call: CallbackQuery):
                 callback_data=f"my_ticket:{code}"
             )])
             buttons.append([InlineKeyboardButton(
-                text=f"📤 Отправить на вход — {code[-8:]}{suffix}",
+                text=f"📤 На вход — {code[-8:]}",
                 callback_data=f"my_ticket:send:{code}"
             )])
             buttons.append([InlineKeyboardButton(
-                text=f"🎁 Передать билет — {code[-8:]}{suffix}",
+                text=f"🎁 Передать — {code[-8:]}",
                 callback_data=f"my_ticket:transfer:{code}"
             )])
 
-
-
-    buttons.append([InlineKeyboardButton(
-        text="🔄 Обновить", callback_data="my_tickets"
-    )])
-
-    if archived_cnt > 0:
-        buttons.append([InlineKeyboardButton(
-            text=f"📦 Архив билетов ({archived_cnt})", callback_data="my_tickets_archive"
-        )])
-
-    buttons.append([InlineKeyboardButton(
-        text="🎉 Мероприятия", callback_data="show_events"
-    )])
-    buttons.append([InlineKeyboardButton(
-        text="🏠 На главную", callback_data="main_menu"
-    )])
+    buttons.append([InlineKeyboardButton(text="⬅️ К списку событий", callback_data="my_tickets")])
+    buttons.append([InlineKeyboardButton(text="🔄 Обновить", callback_data=f"my_event:{event_id}")])
+    buttons.append([InlineKeyboardButton(text="🏠 На главную", callback_data="main_menu")])
 
     await call.message.answer(
-        text,
+        text[:4000],
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
         parse_mode="HTML",
     )
+    await call.answer()
 
 
 # ================== АРХИВ БИЛЕТОВ (КЛИЕНТ) ==================

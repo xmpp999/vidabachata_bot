@@ -3633,13 +3633,15 @@ async def admin_transfers(call: CallbackQuery):
         )
         return
 
-        text = f"📋 <b>История передач</b> ({len(ticket_transfers)})\n\n"
-        for tr in ticket_transfers[:20]:
-            from_name = tr.get("from_name") or "—"
-            from_uname = tr.get("from_username") or ""
-            to_name = tr.get("to_name") or "—"
-            to_uname = tr.get("to_username") or ""
-            text += (
+    text = f"📋 <b>История передач</b> ({len(ticket_transfers)})\n\n"
+
+    for tr in ticket_transfers[:20]:
+        from_name = tr.get("from_name") or "—"
+        from_uname = tr.get("from_username") or ""
+        to_name = tr.get("to_name") or "—"
+        to_uname = tr.get("to_username") or ""
+
+        text += (
             f"🎫 <code>{tr.get('ticket_code', '—')}</code>\n"
             f"   👤 От: {from_name}"
         )
@@ -3649,7 +3651,6 @@ async def admin_transfers(call: CallbackQuery):
         if to_uname:
             text += f" (@{to_uname})"
 
-        # Цена и тип билета
         tr_price = 0
         tr_type = ""
         tr_ticket = tickets.get(tr.get("ticket_code", ""))
@@ -3663,6 +3664,7 @@ async def admin_transfers(call: CallbackQuery):
                     except (TypeError, ValueError):
                         tr_price = 0
                     break
+
         if tr_type:
             text += f"\n   🎫 {tr_type}"
             if tr_price > 0:
@@ -3680,6 +3682,7 @@ async def admin_transfers(call: CallbackQuery):
         [InlineKeyboardButton(text="🔄 Обновить", callback_data="admin:transfers")],
         [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin:back")],
     ])
+
     try:
         await call.message.edit_text(text[:4000], reply_markup=kb, parse_mode="HTML")
     except Exception:

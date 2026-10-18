@@ -3635,11 +3635,11 @@ async def admin_transfers(call: CallbackQuery):
 
         text = f"📋 <b>История передач</b> ({len(ticket_transfers)})\n\n"
         for tr in ticket_transfers[:20]:
-        from_name = tr.get("from_name") or "—"
-        from_uname = tr.get("from_username") or ""
-        to_name = tr.get("to_name") or "—"
-        to_uname = tr.get("to_username") or ""
-        text += (
+            from_name = tr.get("from_name") or "—"
+            from_uname = tr.get("from_username") or ""
+            to_name = tr.get("to_name") or "—"
+            to_uname = tr.get("to_username") or ""
+            text += (
             f"🎫 <code>{tr.get('ticket_code', '—')}</code>\n"
             f"   👤 От: {from_name}"
         )

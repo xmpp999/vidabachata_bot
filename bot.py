@@ -173,6 +173,13 @@ def save_order(order: dict):
     except Exception as e:
         print(f"[SUPABASE] save_order ошибка: {e}")
 
+def save_ticket_transfer(transfer: dict):
+    """Сохраняет запись о передаче билета."""
+    try:
+        supabase.table("ticket_transfers").insert(transfer).execute()
+    except Exception as e:
+        print(f"[SUPABASE] save_ticket_transfer ошибка: {e}")
+
 
 def save_checker(chk_id: str):
     """Сохраняет одного checker'а (точечно, без delete+insert)."""
@@ -1020,7 +1027,7 @@ class Reg(StatesGroup):
     ticket_type = State()
     partner_input = State()
     payment = State()
-
+    transfer_input = State() 
 
 class Admin(StatesGroup):
     menu = State()
@@ -4694,6 +4701,12 @@ async def my_tickets(call: CallbackQuery):
                 text=f"📤 Отправить на вход — {code[-8:]}{suffix}",
                 callback_data=f"my_ticket:send:{code}"
             )])
+            buttons.append([InlineKeyboardButton(
+                text=f"🎁 Передать билет — {code[-8:]}{suffix}",
+                callback_data=f"my_ticket:transfer:{code}"
+            )])
+
+
 
     buttons.append([InlineKeyboardButton(
         text="🔄 Обновить", callback_data="my_tickets"
@@ -4836,6 +4849,168 @@ async def my_ticket_send_start(call: CallbackQuery):
         parse_mode="HTML",
     )
     await call.answer()
+
+@dp.callback_query(F.data.startswith("my_ticket:transfer:"))
+async def my_ticket_transfer_start(call: CallbackQuery, state: FSMContext):
+    code = call.data.split(":", 2)[2]
+    user_id = call.from_user.id
+
+    ticket = tickets.get(code)
+    if not ticket:
+        await call.answer("Билет не найден", show_alert=True)
+        return
+    if str(ticket.get("user_id")) != str(user_id):
+        await call.answer("Это не ваш билет", show_alert=True)
+        return
+    if ticket.get("auto_used"):
+        await call.answer("Билет сгорел — передать нельзя", show_alert=True)
+        return
+    if ticket.get("used"):
+        await call.answer("Билет уже использован — передать нельзя", show_alert=True)
+        return
+
+    event = next((e for e in events if str(e["id"]) == str(ticket.get("event_id"))), None)
+    if not event:
+        await call.answer("Событие не найдено", show_alert=True)
+        return
+    try:
+        start_dt = datetime.fromisoformat(event.get("start_dt") or "")
+    except (ValueError, TypeError):
+        await call.answer("Ошибка в дате события", show_alert=True)
+        return
+
+    now = datetime.now()
+    hours_left = (start_dt - now).total_seconds() / 3600
+
+    if hours_left < 5:
+        await call.answer(
+            f"❌ Передача невозможна.\n\n"
+            f"До начала: {hours_left:.1f} ч.\n"
+            f"Передача разрешена не позднее чем за 5 часов.",
+            show_alert=True,
+        )
+        return
+
+    await state.update_data(transfer_code=code)
+    await call.message.answer(
+        f"🎁 <b>Передача билета</b>\n\n"
+        f"Код: <code>{code}</code>\n"
+        f"🎉 {event.get('title', '—')}\n"
+        f"📅 {event.get('date_text', '—')}\n"
+        f"⏱ До начала: <b>{hours_left:.1f} ч</b>\n\n"
+        f"Отправьте <b>@username</b> получателя.\n"
+        f"Он должен быть зарегистрирован в боте.\n\n"
+        f"Для отмены — /start",
+        parse_mode="HTML",
+    )
+    await state.set_state(Reg.transfer_input)
+    await call.answer()
+
+
+@dp.message(Reg.transfer_input)
+async def my_ticket_transfer_input(message: Message, state: FSMContext):
+    text = message.text.strip()
+    if not text.startswith("@"):
+        await message.answer("❌ Формат: <b>@username</b>", parse_mode="HTML")
+        return
+
+    data = await state.get_data()
+    code = data.get("transfer_code")
+    ticket = tickets.get(code)
+    if not ticket:
+        await message.answer("❌ Билет не найден.")
+        await state.clear()
+        return
+
+    if str(ticket.get("user_id")) != str(message.from_user.id):
+        await message.answer("❌ Это не ваш билет.")
+        await state.clear()
+        return
+
+    event = next((e for e in events if str(e["id"]) == str(ticket.get("event_id"))), None)
+    if not event:
+        await message.answer("❌ Событие не найдено.")
+        await state.clear()
+        return
+    try:
+        start_dt = datetime.fromisoformat(event.get("start_dt") or "")
+    except (ValueError, TypeError):
+        await message.answer("❌ Ошибка в дате события.")
+        await state.clear()
+        return
+    if (start_dt - datetime.now()).total_seconds() / 3600 < 5:
+        await message.answer(
+            "❌ Передача невозможна — до события осталось менее 5 часов.",
+        )
+        await state.clear()
+        return
+
+    receiver_uname = text.lower().lstrip("@")
+    receiver_id = username_index.get(receiver_uname)
+
+    if not receiver_id:
+        await message.answer(
+            f"❌ Пользователь <b>{text}</b> не найден в боте.\n"
+            f"Он должен сначала зарегистрироваться.",
+            parse_mode="HTML",
+        )
+        return
+
+    if receiver_id == message.from_user.id:
+        await message.answer("❌ Нельзя передать билет самому себе.")
+        return
+
+    receiver = users.get(receiver_id, {})
+    if not receiver:
+        await message.answer("❌ Получатель не зарегистрирован.")
+        return
+
+    sender = users.get(message.from_user.id, {})
+    sender_name = f"{sender.get('name', '')} {sender.get('surname', '')}".strip() or f"@{message.from_user.username or '—'}"
+    receiver_name = f"{receiver.get('name', '')} {receiver.get('surname', '')}".strip() or f"@{receiver_uname}"
+
+    ticket["user_id"] = receiver_id
+    ticket["holder"] = receiver_name
+    ticket["issued_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+    save_ticket(code)
+
+    save_ticket_transfer({
+        "ticket_code": code,
+        "from_user_id": message.from_user.id,
+        "from_username": message.from_user.username or "",
+        "from_name": sender_name,
+        "to_user_id": receiver_id,
+        "to_username": receiver_uname,
+        "to_name": receiver_name,
+        "event_id": ticket.get("event_id", ""),
+        "event_title": ticket.get("event_title", ""),
+        "transferred_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "note": "",
+    })
+
+    await state.clear()
+
+    try:
+        await bot.send_message(
+            receiver_id,
+            f"🎁 <b>Вам передали билет!</b>\n\n"
+            f"Код: <code>{code}</code>\n"
+            f"🎉 {ticket.get('event_title', '—')}\n"
+            f"📅 {ticket.get('event_date', '—')}\n"
+            f"👤 От: {sender_name}\n\n"
+            f"Откройте «🎟 Мои билеты», чтобы посмотреть QR.",
+            parse_mode="HTML",
+        )
+    except Exception:
+        pass
+
+    await message.answer(
+        f"✅ <b>Билет передан</b>\n\n"
+        f"Код: <code>{code}</code>\n"
+        f"Получатель: <b>{receiver_name}</b> (@{receiver_uname})\n\n"
+        f"Билет больше не в вашем списке.",
+        parse_mode="HTML",
+    )
 
 
 @dp.callback_query(F.data.startswith("my_ticket:sent:"))

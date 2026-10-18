@@ -41,6 +41,7 @@ from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from supabase import create_client, Client
 from yookassa import Configuration, Payment
+from nalogo import Client as NalogClient
 
 # ================== КОНФИГ ==================
 load_dotenv()
@@ -483,6 +484,27 @@ def verify_payment_with_yookassa(payment_id: str) -> bool:
     except Exception as e:
         print(f"[YOOKASSA] Ошибка верификации платежа {payment_id}: {e}")
         return False
+async def send_fns_receipt(amount: int, description: str, user_email: str = ""):
+    """Отправляет чек в ФНС через API «Мой налог» (самозанятый)."""
+    inn = os.getenv("NALOGO_INN", "")
+    password = os.getenv("NALOGO_PASSWORD", "")
+    if not inn or not password:
+        print("[NALOGO] ИНН или пароль не заданы — чек не отправлен")
+        return None
+
+    try:
+        client = NalogClient(inn=inn, password=password)
+        await client.create_new_access_token()
+        receipt = await client.income().create(
+            name=description,
+            amount=amount,
+        )
+        link = client.receipt().print_url(receipt)
+        print(f"[NALOGO] ✅ Чек создан: {link}")
+        return link
+    except Exception as e:
+        print(f"[NALOGO] ❌ Ошибка создания чека: {e}")
+        return None
 
 
 # ================== ЧЁРНЫЙ СПИСОК ==================
@@ -5703,6 +5725,13 @@ async def process_successful_payment(payment_id: str):
     buyer_phone = buyer_user.get("phone") or pending.get("phone", "") or "—"
     ticket_type_label = "Парный" if ticket_type == "pair" else "Обычный"
 
+       # Чек для самозанятого (ФНС)
+    receipt_link = await send_fns_receipt(
+        amount=pending["price"],
+        description=f"Билет на {event.get('title', 'мероприятие')}",
+        user_email=pending.get("email", ""),
+    )
+
     admin_lines = [
         f"💰 <b>Оплата получена!</b>\n\n",
         f"🆔 Платёж: <code>{payment_id}</code>\n",
@@ -5717,6 +5746,9 @@ async def process_successful_payment(payment_id: str):
     admin_lines.append(f"📱 {buyer_phone}\n")
     admin_lines.append("\n")
     admin_lines.append(f"🎟 {ticket_type_label} | {pending['price']} ₽\n")
+
+    if receipt_link:
+        admin_lines.append(f"\n🧾 Чек: {receipt_link}\n")
 
     try:
         await bot.send_message(ADMIN_ID, "".join(admin_lines), parse_mode="HTML")
@@ -5735,6 +5767,8 @@ async def process_successful_payment(payment_id: str):
     client_lines.append(f"🎟 {ticket_type_label} | {pending['price']} ₽\n\n")
     client_lines.append("🎫 Билет отправлен выше ⬆️\n")
     client_lines.append("Покажите QR-код на входе.")
+    if receipt_link:
+        client_lines.append(f"\n🧾 Чек: {receipt_link}\n")
 
     kb_client = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="🎟 Мои билеты", callback_data="my_tickets"),

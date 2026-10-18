@@ -6001,6 +6001,52 @@ def start_self_ping():
     """Запускает самопинг в фоне (async)."""
     asyncio.create_task(_self_ping_loop())
 
+@dp.message(Command("post"))
+async def admin_post(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("Только для админа")
+        return
+
+    chat_id = -1004204205612
+
+    text = (
+        "Друзья! Приглашаем в этот вторник, <b>20 октября</b>, на нашу первую вечеринку "
+        "в просторном и уютном пространстве! 🕺💃\n\n"
+        "Прекрасная возможность потанцевать на неделе для тех, кто уезжает на выходные из города!))\n\n"
+        "🕖 <b>С 20:30 до 23:00</b>\n"
+        "📍 <b>Место:</b> Casa Latina, Садовая 28-30 к.1 "
+        "(10 мин от метро Садовая / Спасская / Сенная пл.)\n\n"
+        "<b>Формат:</b> примерно 5-8 Бачат / 1 Сальса или Кизомба "
+        "(формат может быть скорректирован).\n"
+        "В первый час — 100% Бачата.\n\n"
+        "🎵🎵🎵 Зажигательная музыка от <b>Dj Ruslan!</b> (СПб) 🔥🔥🔥\n\n"
+        "<b>Билеты:</b>\n"
+        "🎟 Одиночный: через бота — <b>500 ₽</b> / на входе — <b>600 ₽</b>\n"
+        "🎟 Парный: через бота — <b>900 ₽</b> / на входе — <b>1100 ₽</b>\n\n"
+        "Приходите танцевать, создадим свою атмосферу вместе!)) 💃🕺♥️♥️♥️👍😊🤗"
+    )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="🔘 Забронировать билет",
+            url="https://t.me/VidaBachata_bot"
+        )],
+        [InlineKeyboardButton(
+            text="🔘 Локация на карте",
+            url="https://yandex.ru/maps/?text=Садовая 28-30 к.1, Санкт-Петербург"
+        )],
+    ])
+
+    try:
+        await bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            reply_markup=kb,
+            parse_mode="HTML",
+        )
+        await message.answer("✅ Пост опубликован в чате")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
 
 # ================== ЗАПУСК ==================
 async def main():

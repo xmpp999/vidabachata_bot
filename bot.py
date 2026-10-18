@@ -494,14 +494,22 @@ async def send_fns_receipt(amount: int, description: str, user_email: str = ""):
         return None
 
     try:
-        client = NalogClient(inn=inn, password=password)
-        await client.create_new_access_token()
-        receipt = await client.income().create(
+        client = NalogClient()
+        token = await client.create_new_access_token(inn, password)
+        await client.authenticate(token)
+
+        income_api = client.income()
+        result = await income_api.create(
             name=description,
             amount=amount,
+            quantity=1,
         )
-        link = client.receipt().print_url(receipt)
+
+        receipt_uuid = result["approvedReceiptUuid"]
+        link = client.receipt().print_url(receipt_uuid)
         print(f"[NALOGO] ✅ Чек создан: {link}")
+
+        await client.aclose()
         return link
     except Exception as e:
         print(f"[NALOGO] ❌ Ошибка создания чека: {e}")

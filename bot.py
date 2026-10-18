@@ -4835,7 +4835,7 @@ async def my_event_tickets(call: CallbackQuery):
                 partner_uid = partner_ticket.get("user_id")
                 partner_user = users.get(int(partner_uid or 0), {})
                 partner_uname = partner_user.get("username") or ""
-                if partner_uname and str(partner_ticket.get("user_id")) != str(user_id):
+                if partner_uname and str(partner_ticket.get("user_id")) == str(user_id):
                     paid_note = f" (оплачен @{partner_uname})"
 
         text += (

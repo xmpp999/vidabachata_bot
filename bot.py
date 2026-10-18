@@ -79,6 +79,7 @@ pending_payments = {}
 processed_payments = set()
 checkers = {}
 ticket_logs = []
+ticket_transfers = []
 
 settings = {
     "support": os.getenv("SUPPORT", "@your_support"),
@@ -411,7 +412,15 @@ def load_data():
     except Exception as e:
         print(f"[SUPABASE] Ошибка загрузки: {e}")
 
-
+def load_transfers():
+    """Загружает историю передач из Supabase."""
+    global ticket_transfers
+    try:
+        resp = supabase.table("ticket_transfers").select("*").order("transferred_at", desc=True).limit(500).execute()
+        ticket_transfers = resp.data or []
+    except Exception as e:
+        print(f"[SUPABASE] load_transfers ошибка: {e}")
+        ticket_transfers = []
 
 
 # ================== ЮKASSA ==================
@@ -2169,6 +2178,7 @@ async def show_admin_menu(message: Message, state: FSMContext):
         [InlineKeyboardButton(text="📈 Статистика", callback_data="admin:stats")],
         [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin:broadcast")],
         [InlineKeyboardButton(text=f"🎟 Все билеты", callback_data="admin:tickets")],
+        [InlineKeyboardButton(text="📋 История передач", callback_data="admin:transfers")],
         [InlineKeyboardButton(text=f"📦 Архив билетов ({auto_burned_cnt})", callback_data="admin:archived_tickets")],
         [InlineKeyboardButton(text="📤 Выгрузка билетов", callback_data="admin:export")],
         [InlineKeyboardButton(text="🎫 Найти билет", callback_data="admin:find_ticket")],
@@ -3608,6 +3618,55 @@ async def admin_tickets_csv(call: CallbackQuery):
     await call.answer()
 
 
+@dp.callback_query(F.data == "admin:transfers")
+async def admin_transfers(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("Только для админа", show_alert=True)
+        return
+
+    if not ticket_transfers:
+        await call.message.edit_text(
+            "📭 История передач пуста.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin:back")]
+            ]),
+        )
+        return
+
+    text = f"📋 <b>История передач</b> ({len(ticket_transfers)})\n\n"
+    for tr in ticket_transfers[:20]:
+        from_name = tr.get("from_name") or "—"
+        from_uname = tr.get("from_username") or ""
+        to_name = tr.get("to_name") or "—"
+        to_uname = tr.get("to_username") or ""
+        text += (
+            f"🎫 <code>{tr.get('ticket_code', '—')}</code>\n"
+            f"   👤 От: {from_name}"
+        )
+        if from_uname:
+            text += f" (@{from_uname})"
+        text += f"\n   👤 Кому: {to_name}"
+        if to_uname:
+            text += f" (@{to_uname})"
+        text += (
+            f"\n   🎉 {tr.get('event_title', '—')}\n"
+            f"   🕐 {tr.get('transferred_at', '—')}\n\n"
+        )
+
+    if len(ticket_transfers) > 20:
+        text += f"... и ещё {len(ticket_transfers) - 20}\n"
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data="admin:transfers")],
+        [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin:back")],
+    ])
+    try:
+        await call.message.edit_text(text[:4000], reply_markup=kb, parse_mode="HTML")
+    except Exception:
+        await call.message.answer(text[:4000], reply_markup=kb, parse_mode="HTML")
+    await call.answer()
+
+
 # ========== КОНЕЦ ЧАСТИ 11 ==========
 
 # ================== АРХИВ БИЛЕТОВ (АДМИН) ==================
@@ -4683,12 +4742,23 @@ async def my_tickets(call: CallbackQuery):
         event_date = t.get("event_date", "—")
         issued_at = t.get("issued_at", "—")
 
+                # Ищем историю передач для этого билета
+        transfer_note = ""
+        for tr in ticket_transfers:
+            if tr.get("ticket_code") == code:
+                if str(tr.get("to_user_id")) == str(user_id) and str(tr.get("from_user_id")) != str(user_id):
+                    transfer_note = f"   🎁 Получен от: {tr.get('from_name', '—')}"
+                    if tr.get("from_username"):
+                        transfer_note += f" (@{tr.get('from_username')})"
+                    transfer_note += "\n"
+
         text += (
             f"{status} <code>{code}</code>{status_label}\n"
             f"   🎉 {event_title}\n"
             f"   📅 {event_date}\n"
             f"   🎟 {type_label}\n"
-            f"   🛒 Куплен: {issued_at}\n\n"
+            f"   🛒 Куплен: {issued_at}\n"
+            f"{transfer_note}\n"
         )
 
         if not t.get("used") and not t.get("auto_used"):
@@ -5796,6 +5866,7 @@ async def main():
     _main_loop = asyncio.get_running_loop()
 
     load_data()
+    load_transfers()
     print("🤖 Бот запускается...")
 
     start_keepalive()

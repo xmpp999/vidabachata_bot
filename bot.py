@@ -486,6 +486,7 @@ def verify_payment_with_yookassa(payment_id: str) -> bool:
         return False
 async def send_fns_receipt(amount: int, description: str, user_email: str = ""):
     """Отправляет чек в ФНС через API «Мой налог» (самозанятый)."""
+    print(f"[NALOGO] Вызов send_fns_receipt: amount={amount}, desc={description[:50]}")
     inn = os.getenv("NALOGO_INN", "")
     password = os.getenv("NALOGO_PASSWORD", "")
     if not inn or not password:

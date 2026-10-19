@@ -4905,7 +4905,7 @@ async def my_event_tickets(call: CallbackQuery):
                 callback_data=f"my_ticket:{code}"
             )])
             buttons.append([InlineKeyboardButton(
-                text=f"📤 На вход — {code[-8:]}",
+                text=f"📤 Отправить на вход — {code[-8:]}",
                 callback_data=f"my_ticket:send:{code}"
             )])
             buttons.append([InlineKeyboardButton(

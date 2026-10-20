@@ -2214,6 +2214,7 @@ async def show_admin_menu(message: Message, state: FSMContext):
         [InlineKeyboardButton(text="📤 Выгрузка билетов", callback_data="admin:export")],
         [InlineKeyboardButton(text="🎫 Найти билет", callback_data="admin:find_ticket")],
         [InlineKeyboardButton(text="📧 Отправить отчёт", callback_data="admin:report")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")],  
     ])
     await message.answer(
         f"🛠 <b>Админ-панель</b>\n\n"
